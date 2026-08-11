@@ -138,6 +138,13 @@ describe('computer-use shared v2 contract', () => {
       instruction: 'batch', sessionId: 'top-level',
       parallel: [entry, { instruction: 'observe', sessionId: 'session-beta' }]
     }).success).toBe(false)
+    expect(computerUseRunInputSchema.safeParse({
+      instruction: 'batch',
+      parallel: [
+        { ...entry, target: { targetId: 'target-alpha', kind: 'browser-page', ownership: 'attached', locator: {} } },
+        { instruction: 'observe', sessionId: 'session-beta' }
+      ]
+    }).success).toBe(false)
   })
 
   it('accepts matching redundant batch policy assertions but rejects drift or omission', () => {

@@ -196,7 +196,9 @@ export const computerUseRunInputSchema = z.object({
       }
       sessionIds.add(entry.sessionId)
     })
-  }).optional(),
+  }).describe(
+    'Run 2-8 pre-bound sessions concurrently. Each child references its immutable binding by sessionId; never include target in a parallel child.'
+  ).optional(),
   sessionId: safeId.optional(),
   target: computerUseTargetSchema.optional(),
   requestedIsolation: computerUseIsolationSchema.optional(),

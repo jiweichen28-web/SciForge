@@ -94,13 +94,15 @@ describe('computer-use MCP server', () => {
       }
       const runTool = tools.tools.find((tool) => tool.name === COMPUTER_USE_MCP_TOOL_NAME)
       const parallel = (runTool?.inputSchema as {
-        properties?: { parallel?: { type?: string; items?: unknown; minItems?: number; maxItems?: number } }
+        properties?: { parallel?: { type?: string; description?: string; items?: unknown; minItems?: number; maxItems?: number } }
       }).properties?.parallel
       expect(parallel).toMatchObject({
         type: 'array', minItems: 2, maxItems: 8,
         items: expect.objectContaining({ type: 'object' })
       })
+      expect(parallel?.description).toContain('never include target in a parallel child')
       expect(runTool?.description).toContain('top-level instruction string is still required')
+      expect(runTool?.description).toContain('never include target in a parallel child')
       expect(runTool?.description).toContain('queueIfBusy is reserved and must be omitted or false')
       const runProperties = (runTool?.inputSchema as {
         properties?: {

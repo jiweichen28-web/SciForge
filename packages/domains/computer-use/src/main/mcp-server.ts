@@ -118,6 +118,7 @@ export function createComputerUseMcpServer(
       'target-scoped observation/readback, browser click, or bounded Windows UIA Pattern sequence, without host-global',
       'input. UIA sequence steps are write/invoke/toggle and require role plus name or automationId. Use parallel with 2-8 different pre-bound',
       'sessions when tasks must overlap under one approval; each child keeps its own request, channel, lease, and result.',
+      'Each parallel child references a previously bound target by sessionId; never include target in a parallel child.',
       'Each parallel child is authoritative for requestedIsolation and allowDegraded; matching top-level copies are accepted',
       'as redundant assertions. A top-level instruction string is still required as the parallel batch summary.',
       'queueIfBusy is reserved and must be omitted or false at both batch and child levels; true returns',
