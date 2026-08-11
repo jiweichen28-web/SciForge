@@ -113,6 +113,12 @@ async function call(
 }
 
 describe('computer-use CDP adapter', () => {
+  it('rejects an explicit port blocked by the Fetch standard', async () => {
+    await expect(startComputerUseCdpAdapter({
+      driver: fakeDriver(), token: 'adapter-secret', port: 6667
+    })).rejects.toThrow('CDP adapter port 6667 is blocked by the Fetch standard.')
+  })
+
   it('retries read-only evaluation after a navigation destroys the old execution context', async () => {
     const evaluate = vi.fn()
       .mockRejectedValueOnce(new Error('Execution context was destroyed, most likely because of a navigation'))

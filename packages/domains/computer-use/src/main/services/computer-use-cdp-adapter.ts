@@ -23,6 +23,17 @@ const ACTION_TIMEOUT_MS = 10_000
 const OBSERVATION_TIMEOUT_MS = ACTION_TIMEOUT_MS
 const NAVIGATION_READ_RETRY_ATTEMPTS = 3
 const NAVIGATION_SETTLE_TIMEOUT_MS = 1_500
+const LOOPBACK_BIND_ATTEMPTS = 20
+// WHATWG Fetch §2.9. A Windows ephemeral range can include these ports, and
+// Node fetch rejects them before sending a request even when the peer is local.
+const FETCH_BLOCKED_PORTS = new Set([
+  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77,
+  79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135,
+  137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531,
+  532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720,
+  1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+  6668, 6669, 6679, 6697, 10080
+])
 
 export type BrowserPageCdpAdapterTarget = Readonly<{
   targetId: string
@@ -432,11 +443,7 @@ export async function startComputerUseCdpAdapter(options: Readonly<{
   const server = createServer((request, response) => {
     void serveRequest(options.driver, token, request, response)
   })
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(options.port ?? 0, '127.0.0.1', () => resolve())
-  })
-  const address = server.address() as AddressInfo
+  const address = await listenOnFetchSafeLoopbackPort(server, options.port)
   return Object.freeze({
     url: `http://127.0.0.1:${address.port}`,
     token,
@@ -445,6 +452,37 @@ export async function startComputerUseCdpAdapter(options: Readonly<{
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
     }
   })
+}
+
+async function listenOnFetchSafeLoopbackPort(
+  server: ReturnType<typeof createServer>,
+  requestedPort?: number
+): Promise<AddressInfo> {
+  if (requestedPort && FETCH_BLOCKED_PORTS.has(requestedPort)) {
+    throw new Error(`CDP adapter port ${requestedPort} is blocked by the Fetch standard.`)
+  }
+  const attempts = requestedPort ? 1 : LOOPBACK_BIND_ATTEMPTS
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        server.off('listening', onListening)
+        reject(error)
+      }
+      const onListening = () => {
+        server.off('error', onError)
+        resolve()
+      }
+      server.once('error', onError)
+      server.once('listening', onListening)
+      server.listen(requestedPort ?? 0, '127.0.0.1')
+    })
+    const address = server.address() as AddressInfo
+    if (!FETCH_BLOCKED_PORTS.has(address.port)) return address
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve())
+    })
+  }
+  throw new Error(`CDP adapter could not bind a Fetch-safe loopback port after ${attempts} attempts.`)
 }
 
 async function serveRequest(
