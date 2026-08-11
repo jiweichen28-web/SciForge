@@ -685,7 +685,15 @@ def _run_loop(
             elif low == "answer":
                 answer_text = (args or {}).get("text", "") or ""
                 step_rec.update({"terminal": "answer", "answer": answer_text})
-                status = "agent_reported_done"
+                answer_status = str((args or {}).get("status", "")).strip().lower()
+                explicit_failure = bool(
+                    re.match(r"^\s*failure\s*:", str(answer_text), flags=re.IGNORECASE)
+                )
+                status = (
+                    "agent_reported_fail"
+                    if answer_status == "failure" or explicit_failure
+                    else "agent_reported_done"
+                )
             else:
                 succeeded = str((args or {}).get("status", "success")).lower() != "failure"
                 step_rec["terminal"] = action_type

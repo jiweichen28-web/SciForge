@@ -110,8 +110,10 @@ SYSTEM_PROMPT = (
     '"type": "number"}, '
     '"time": {"description": "The seconds to wait. Required only by '
     '`action=wait`.", "type": "number"}, '
-    '"status": {"description": "The status of the task. Required only by '
-    '`action=terminate`.", "type": "string", "enum": ["success", "failure"]}}, '
+    '"status": {"description": "The status of the task. Required by '
+    '`action=terminate`; include it with `action=answer` when the answer reports '
+    'that the requested task could not be completed.", "type": "string", '
+    '"enum": ["success", "failure"]}}, '
     '"required": ["action"], "type": "object"}}}\n'
     "</tools>\n\n"
     "# Response format\n\n"
@@ -164,7 +166,14 @@ RESPONSES_COMPUTER_USE_TOOL: Dict[str, Any] = {
             "pixels": {"type": "number"},
             "value": {"type": "number"},
             "time": {"type": "number"},
-            "status": {"type": "string", "enum": ["success", "failure"]},
+            "status": {
+                "type": "string",
+                "enum": ["success", "failure"],
+                "description": (
+                    "Required for terminate. Include failure with answer when the "
+                    "requested task could not be completed."
+                ),
+            },
         },
         "required": ["action"],
         "additionalProperties": False,

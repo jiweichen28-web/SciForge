@@ -444,6 +444,9 @@ def test_system_prompt_requires_native_tool_call_optional():
     assert "Call the provided native `computer_use` function exactly once" in owl_agent.SYSTEM_PROMPT
     assert "do not emit JSON or XML as text" in owl_agent.SYSTEM_PROMPT
     assert "Output exactly in the order: Action, <tool_call>" not in owl_agent.SYSTEM_PROMPT
+    status_schema = owl_agent.RESPONSES_COMPUTER_USE_TOOL["parameters"]["properties"]["status"]
+    assert "answer" in status_schema["description"]
+    assert "failure" in status_schema["description"]
 
 
 def test_model_router_native_function_call_becomes_runner_action_optional():

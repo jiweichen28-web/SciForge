@@ -403,6 +403,35 @@ def test_retryable_planning_failure_backs_off_and_retries_before_any_backend_act
     assert backend.open_handle_count == 0
 
 
+def test_answer_that_explicitly_reports_failure_is_not_marked_done(monkeypatch, tmp_path):
+    answers = [
+        {"action": "answer", "text": "Failure: canonical visible state is unavailable"},
+        {"action": "answer", "text": "The requested task could not be completed", "status": "failure"},
+    ]
+    for index, answer in enumerate(answers):
+        backend = FakeBackend()
+        service = ComputerUseService(router=BackendRouter([backend]))
+        bind(service)
+        output = '<tool_call>{"arguments":' + json.dumps(answer) + "}</tool_call>"
+        monkeypatch.setattr("cua.runner.owl_agent.call_owl", lambda *_args, **_kwargs: output)
+
+        cfg = config(tmp_path)
+        result = service.run(
+            {
+                "instruction": "inspect", "sessionId": "session-1",
+                "requestId": f"request-failed-answer-{index}",
+            },
+            lambda request, channel: run_task(cfg, request["instruction"], channel),
+        )
+
+        assert result["ok"] is True
+        assert result["data"]["status"] == "agent_reported_fail"
+        assert result["data"]["steps"][0]["terminal"] == "answer"
+        assert backend.read("target-1") == ()
+        assert service.registry.snapshot_counts()["activeLeases"] == 0
+        assert backend.open_handle_count == 0
+
+
 def test_retryable_planning_failure_stops_after_bounded_attempts(monkeypatch, tmp_path):
     from cua.owl_agent import ModelCallError
 
