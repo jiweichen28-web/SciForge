@@ -52,7 +52,9 @@ def _batch_child_evidence(
     started_at: float,
     completed_at: float,
 ) -> dict[str, Any]:
-    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+    error_details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    data = result.get("data") if isinstance(result.get("data"), dict) else error_details
     final_observation = (
         data.get("finalObservation")
         if isinstance(data.get("finalObservation"), dict)
@@ -81,7 +83,6 @@ def _batch_child_evidence(
             "verification": outcome.get("verification"),
             "verificationReason": evidence.get("reason"),
         })
-    error = result.get("error") if isinstance(result.get("error"), dict) else {}
     return {
         "sessionId": session_id,
         "targetId": target_id,

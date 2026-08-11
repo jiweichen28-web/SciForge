@@ -486,6 +486,45 @@ def test_model_response_after_deadline_cannot_be_reported_as_success(monkeypatch
     assert backend.open_handle_count == 0
 
 
+def test_model_deadline_preserves_committed_partial_trace(monkeypatch, tmp_path):
+    backend = FakeBackend()
+    service = ComputerUseService(router=BackendRouter([backend]))
+    bind(service)
+    calls = 0
+
+    def action_then_delayed_answer(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return '<tool_call>{"arguments":{"action":"type","text":"alpha"}}</tool_call>'
+        time.sleep(0.08)
+        return '<tool_call>{"arguments":{"action":"answer","text":"too late"}}</tool_call>'
+
+    monkeypatch.setattr("cua.runner.owl_agent.call_owl", action_then_delayed_answer)
+    cfg = config(tmp_path)
+    result = service.run(
+        {
+            "instruction": "act then expire during model",
+            "sessionId": "session-1",
+            "requestId": "request-partial-deadline",
+            "deadlineMs": 50,
+        },
+        lambda request, channel: run_task(
+            cfg, request["instruction"], channel, execute=True, approve=True,
+        ),
+    )
+
+    assert result["error"]["code"] == "TIMEOUT"
+    details = result["error"]["details"]
+    assert details["status"] == "timed_out"
+    assert details["stepCount"] == 1
+    assert details["steps"][0]["outcome"]["committed"] is True
+    assert details["finalObservation"]["revision"] == "fake:1"
+    assert backend.read("target-1") == ("alpha",)
+    assert service.registry.snapshot_counts()["activeLeases"] == 0
+    assert backend.open_handle_count == 0
+
+
 def test_action_unknown_returns_error_and_still_cleans_every_resource(monkeypatch, tmp_path):
     backend = FakeBackend(actions=("observe", "type"), fail_action_target="target-1")
     service = ComputerUseService(router=BackendRouter([backend]))

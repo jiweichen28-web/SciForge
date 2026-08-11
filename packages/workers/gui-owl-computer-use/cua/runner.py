@@ -572,6 +572,28 @@ def _run_loop(
     action_outcomes: List[str] = []
     replan_hint = False
 
+    def partial_trace(status_override: str | None = None) -> Dict[str, Any]:
+        return {
+            "status": status_override or status,
+            "executed": really_execute,
+            "instruction": instruction,
+            "answer": answer_text,
+            "platform": _OS_NAME,
+            "screen": [width, height],
+            "steps": steps,
+            "stepCount": len(steps),
+            "targetId": channel.target.target_id,
+            "backend": channel.capabilities.backend.value,
+            "requestedIsolation": channel.isolation.requested.value,
+            "effectiveIsolation": channel.isolation.effective.value,
+            "degraded": channel.isolation.degraded,
+            "degradedReason": channel.isolation.degraded_reason,
+            "finalObservation": {
+                "revision": latest_revision,
+                "semanticTree": _result_semantic_tree(observation_metadata),
+            },
+        }
+
     for index in range(cfg.max_steps):
         if channel.cancelled:
             status = "cancelled"
@@ -604,7 +626,10 @@ def _run_loop(
         while True:
             remaining = channel.remaining_seconds
             if remaining is not None and remaining <= 0:
-                raise ChannelError("TIMEOUT", "request deadline expired before model call")
+                raise ChannelError(
+                    "TIMEOUT", "request deadline expired before model call",
+                    details=partial_trace("timed_out"),
+                )
             timeout = min(120.0, remaining) if remaining is not None else 120.0
             try:
                 with channel.activity():
@@ -630,7 +655,10 @@ def _run_loop(
                     raise
                 remaining = channel.remaining_seconds
                 if remaining is not None and remaining <= 0:
-                    raise ChannelError("TIMEOUT", "request deadline expired during model call") from error
+                    raise ChannelError(
+                        "TIMEOUT", "request deadline expired during model call",
+                        details=partial_trace("timed_out"),
+                    ) from error
                 if (
                     model_attempt < len(_MODEL_RETRY_BACKOFF_SECONDS)
                     and not channel.cancelled
@@ -647,6 +675,7 @@ def _run_loop(
                     if remaining is not None and remaining <= backoff:
                         raise ChannelError(
                             "TIMEOUT", "request deadline expired before model retry",
+                            details=partial_trace("timed_out"),
                         ) from error
                     channel.wait(backoff)
                     continue
@@ -661,7 +690,10 @@ def _run_loop(
             raise ChannelError("CANCEL_PENDING", "request was cancelled during model call")
         remaining = channel.remaining_seconds
         if remaining is not None and remaining <= 0:
-            raise ChannelError("TIMEOUT", "request deadline expired during model call")
+            raise ChannelError(
+                "TIMEOUT", "request deadline expired during model call",
+                details=partial_trace("timed_out"),
+            )
 
         args = owl_agent.extract_action(output_text)
         action_type = (args.get("action") if args else "") or ""
@@ -776,26 +808,7 @@ def _run_loop(
     summary = f"{len(steps)} step(s); status={status}; {'executed' if really_execute else 'dry-run (no actions performed)'} ."
     if answer_text:
         summary += f" answer: {answer_text[:200]}"
-    data = {
-        "status": status,
-        "executed": really_execute,
-        "instruction": instruction,
-        "answer": answer_text,
-        "platform": _OS_NAME,
-        "screen": [width, height],
-        "steps": steps,
-        "stepCount": len(steps),
-        "targetId": channel.target.target_id,
-        "backend": channel.capabilities.backend.value,
-        "requestedIsolation": channel.isolation.requested.value,
-        "effectiveIsolation": channel.isolation.effective.value,
-        "degraded": channel.isolation.degraded,
-        "degradedReason": channel.isolation.degraded_reason,
-        "finalObservation": {
-            "revision": latest_revision,
-            "semanticTree": _result_semantic_tree(observation_metadata),
-        },
-    }
+    data = partial_trace()
     terminal = "cancelled" if status == "cancelled" else "completed" if status != "error" else "failed"
     return R.ok(data, summary=summary, artifacts=artifacts, prov=_provenance(channel, started)), terminal
 

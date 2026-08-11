@@ -240,6 +240,61 @@ def test_parallel_batch_overlaps_distinct_targets_and_isolates_one_timeout():
     assert backend.open_handle_count == 0
 
 
+def test_parallel_batch_evidence_preserves_error_partial_trace():
+    backend = FakeBackend()
+    service = ComputerUseService(router=BackendRouter([backend]))
+    for label in ("alpha", "beta"):
+        service.bind_session({
+            "sessionId": f"session-{label}",
+            "owner": {"runtimeId": "runtime-1", "threadId": "thread-1"},
+            "target": uia_target(f"target-{label}"),
+        })
+
+    def execute(request, _channel):
+        if request["instruction"] == "partial timeout":
+            now = time.time()
+            return {
+                "ok": False,
+                "error": {
+                    "code": "TIMEOUT",
+                    "message": "expired after action",
+                    "details": {
+                        "status": "timed_out",
+                        "steps": [{
+                            "step": 0,
+                            "timeline": {
+                                "actionStartedAt": _iso(now),
+                                "actionCompletedAt": _iso(now + 0.001),
+                            },
+                            "outcome": {
+                                "committed": True,
+                                "mayHaveTakenEffect": True,
+                                "verification": "verified",
+                                "evidence": {"reason": "readback"},
+                            },
+                        }],
+                        "finalObservation": {"revision": "fake:1"},
+                    },
+                },
+            }
+        return {"ok": True, "data": {"status": "done", "steps": []}}
+
+    result = service.run_batch({
+        "instruction": "partial evidence",
+        "parallel": [
+            {"instruction": "partial timeout", "sessionId": "session-alpha"},
+            {"instruction": "success", "sessionId": "session-beta"},
+        ],
+    }, execute)
+
+    child = result["data"]["concurrencyEvidence"]["children"][0]
+    assert child["errorCode"] == "TIMEOUT"
+    assert child["executorStatus"] == "timed_out"
+    assert child["finalRevision"] == "fake:1"
+    assert child["actionSpans"][0]["committed"] is True
+    assert child["actionSpans"][0]["verification"] == "verified"
+
+
 def test_parallel_batch_rejects_two_sessions_bound_to_one_target():
     backend = FakeBackend()
     service = ComputerUseService(router=BackendRouter([backend]))
