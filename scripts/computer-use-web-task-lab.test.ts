@@ -9,6 +9,7 @@ describe('Computer Use Web Task Lab', () => {
       'todo', 'wiki', 'form', 'multipage', 'download', 'dynamic'
     ]))
     assert.equal(new Set(WEB_TASKS.map(({ id }) => id)).size, WEB_TASKS.length)
+    assert.ok(WEB_TASKS.every(({ oracle }) => oracle.status.length > 0))
   })
 
   it('renders isolated semantic controls for every task', () => {
@@ -30,6 +31,22 @@ describe('Computer Use Web Task Lab', () => {
     const fileHtml = webTaskHtml(download, new URL(`http://127.0.0.1/task/${download.id}`))
     assert.match(fileHtml, /download="synthetic-epsilon\.txt"/u)
     assert.match(fileHtml, /type="file"[^>]+disabled/u)
+  })
+
+  it('publishes authoritative success oracles that match rendered results', () => {
+    const wiki = WEB_TASKS.find(({ id }) => id === 'beta')
+    const multipage = WEB_TASKS.find(({ id }) => id === 'delta')
+    assert.ok(wiki && multipage)
+    assert.equal(wiki.oracle.semanticHeadingTemplate, 'Knowledge Result: {query}')
+    assert.match(
+      webTaskHtml(wiki, new URL(`http://127.0.0.1/task/${wiki.id}?q=Cas9`)),
+      new RegExp(wiki.oracle.semanticHeadingTemplate.replace('{query}', 'Cas9'))
+    )
+    assert.equal(multipage.oracle.semanticHeading, 'Workflow Complete Delta')
+    assert.equal(multipage.oracle.semanticText, 'Verified code DELTA-42')
+    const completeHtml = webTaskHtml(multipage, new URL(`http://127.0.0.1/task/${multipage.id}?step=3&code=DELTA-42`))
+    assert.match(completeHtml, new RegExp(multipage.oracle.semanticHeading))
+    assert.match(completeHtml, new RegExp(multipage.oracle.semanticText))
   })
 
   it('starts with independent state and no synthetic success', () => {

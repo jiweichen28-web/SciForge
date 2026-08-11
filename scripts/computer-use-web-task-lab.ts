@@ -12,14 +12,14 @@ const require = createRequire(import.meta.url)
 const { chromium } = require('playwright-core') as typeof import('playwright-core')
 
 export const WEB_TASKS = Object.freeze([
-  { id: 'alpha', label: 'Alpha', scenario: 'todo' },
-  { id: 'beta', label: 'Beta', scenario: 'wiki' },
-  { id: 'gamma', label: 'Gamma', scenario: 'form' },
-  { id: 'delta', label: 'Delta', scenario: 'multipage' },
-  { id: 'epsilon', label: 'Epsilon', scenario: 'download' },
-  { id: 'zeta', label: 'Zeta', scenario: 'dynamic' },
-  { id: 'eta', label: 'Eta', scenario: 'todo' },
-  { id: 'theta', label: 'Theta', scenario: 'wiki' }
+  { id: 'alpha', label: 'Alpha', scenario: 'todo', oracle: { status: 'todo-completed', semanticTextTemplate: 'Completed: {value}' } },
+  { id: 'beta', label: 'Beta', scenario: 'wiki', oracle: { status: 'wiki-result', semanticHeadingTemplate: 'Knowledge Result: {query}' } },
+  { id: 'gamma', label: 'Gamma', scenario: 'form', oracle: { status: 'form-submitted', semanticTextTemplate: 'Submitted: {sample} | {discipline} | {priority}' } },
+  { id: 'delta', label: 'Delta', scenario: 'multipage', oracle: { status: 'workflow-completed', semanticHeading: 'Workflow Complete Delta', semanticText: 'Verified code DELTA-42' } },
+  { id: 'epsilon', label: 'Epsilon', scenario: 'download', oracle: { status: 'download-requested', stateValue: 'synthetic-epsilon.txt', downloadRequestDelta: 1 } },
+  { id: 'zeta', label: 'Zeta', scenario: 'dynamic', oracle: { status: 'dynamic-completed', semanticText: 'Dynamic task completed Zeta' } },
+  { id: 'eta', label: 'Eta', scenario: 'todo', oracle: { status: 'todo-completed', semanticTextTemplate: 'Completed: {value}' } },
+  { id: 'theta', label: 'Theta', scenario: 'wiki', oracle: { status: 'wiki-result', semanticHeadingTemplate: 'Knowledge Result: {query}' } }
 ] as const)
 
 export type WebTask = typeof WEB_TASKS[number]
@@ -161,7 +161,7 @@ export async function startWebTaskLab(options: WebTaskLabOptions): Promise<{ cdp
       await page.goto(`${stateEndpoint}/task/${task.id}`, { waitUntil: 'networkidle' })
     }
     await waitForRegistration(state)
-    await writeFile(readyFile, JSON.stringify({ schemaVersion: 1, runId: randomUUID(), cdpEndpoint, stateEndpoint, tasks: WEB_TASKS }, null, 2), 'utf8')
+    await writeFile(readyFile, JSON.stringify({ schemaVersion: 2, runId: randomUUID(), cdpEndpoint, stateEndpoint, tasks: WEB_TASKS }, null, 2), 'utf8')
   } catch (error) {
     await Promise.allSettled(contexts.map((context) => context.close()))
     await browser?.close().catch(() => undefined)
