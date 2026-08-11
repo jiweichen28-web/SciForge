@@ -6,6 +6,8 @@ import type {
   DomainMainAgentExecutionHost
 } from '@sciforge/domain-sdk'
 
+import { listenOnFetchSafeLoopbackPort } from './fetch-safe-loopback'
+
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024
 
 export type ComputerUseAgentModelBridge = Readonly<{
@@ -29,18 +31,7 @@ export async function startComputerUseAgentModelBridge(options: Readonly<{
       })
     })
   })
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject)
-      resolve()
-    })
-  })
-  const address = server.address()
-  if (!address || typeof address === 'string') {
-    await new Promise<void>((resolve) => server.close(() => resolve()))
-    throw new Error('Computer Use agent model bridge did not bind a TCP port.')
-  }
+  const address = await listenOnFetchSafeLoopbackPort(server)
   return Object.freeze({
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     token,
