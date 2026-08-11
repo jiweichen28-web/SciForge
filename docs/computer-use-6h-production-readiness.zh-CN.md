@@ -1,8 +1,10 @@
 # SciForge Computer Use 六小时生产就绪性附加测试
 
-日期：2026-08-11 至 2026-08-12（Asia/Shanghai）  
-性质：独立本地附加测试，不属于 PR #62 或 PR #57  
-分支：`test/6h-production-readiness`  
+日期：2026-08-11 至 2026-08-12（Asia/Shanghai）
+
+性质：独立本地附加测试，不属于 PR #62 或 PR #57
+
+分支：`test/6h-production-readiness`
 基线：`5cd7e5728e516139af36e4e3365055cc94d3d8ba`
 
 ## 结论
