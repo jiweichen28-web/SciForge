@@ -15,8 +15,8 @@ export const WEB_TASKS = Object.freeze([
   { id: 'alpha', label: 'Alpha', scenario: 'todo', oracle: { status: 'todo-completed', semanticTextTemplate: 'Completed: {value}' } },
   { id: 'beta', label: 'Beta', scenario: 'wiki', oracle: { status: 'wiki-result', semanticHeadingTemplate: 'Knowledge Result: {query}' } },
   { id: 'gamma', label: 'Gamma', scenario: 'form', oracle: { status: 'form-submitted', semanticTextTemplate: 'Submitted: {sample} | {discipline} | {priority}' } },
-  { id: 'delta', label: 'Delta', scenario: 'multipage', oracle: { status: 'workflow-completed', semanticHeading: 'Workflow Complete Delta', semanticText: 'Verified code DELTA-42' } },
-  { id: 'epsilon', label: 'Epsilon', scenario: 'download', oracle: { status: 'download-requested', stateValue: 'synthetic-epsilon.txt', downloadRequestDelta: 1 } },
+  { id: 'delta', label: 'Delta', scenario: 'multipage', oracle: { status: 'workflow-step-3', semanticHeading: 'Workflow Complete Delta', semanticText: 'Verified code DELTA-42' } },
+  { id: 'epsilon', label: 'Epsilon', scenario: 'download', oracle: { status: 'download-served', downloadRequestDelta: 1 } },
   { id: 'zeta', label: 'Zeta', scenario: 'dynamic', oracle: { status: 'dynamic-completed', semanticText: 'Dynamic task completed Zeta' } },
   { id: 'eta', label: 'Eta', scenario: 'todo', oracle: { status: 'todo-completed', semanticTextTemplate: 'Completed: {value}' } },
   { id: 'theta', label: 'Theta', scenario: 'wiki', oracle: { status: 'wiki-result', semanticHeadingTemplate: 'Knowledge Result: {query}' } }
