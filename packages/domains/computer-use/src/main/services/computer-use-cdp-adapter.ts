@@ -16,7 +16,11 @@ const require = createRequire(import.meta.url)
 const { chromium } = require('playwright-core') as typeof import('playwright-core')
 const MAX_BODY_BYTES = 1_000_000
 const ACTION_TIMEOUT_MS = 10_000
-const OBSERVATION_TIMEOUT_MS = 3_000
+// Screenshot capture is read-only and can briefly exceed three seconds while
+// Chromium is creating or tearing down other target-scoped CDP sessions. Keep
+// it bounded by the same budget as other adapter operations; the request-level
+// deadline remains the authoritative outer limit.
+const OBSERVATION_TIMEOUT_MS = ACTION_TIMEOUT_MS
 const NAVIGATION_READ_RETRY_ATTEMPTS = 3
 const NAVIGATION_SETTLE_TIMEOUT_MS = 1_500
 

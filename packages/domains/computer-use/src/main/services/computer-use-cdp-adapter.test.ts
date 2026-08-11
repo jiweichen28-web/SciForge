@@ -179,6 +179,35 @@ describe('computer-use CDP adapter', () => {
     expect(bringToFront).toHaveBeenCalledOnce()
   })
 
+  it('allows bounded read-only capture contention up to the adapter timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const send = vi.fn(() => new Promise<never>(() => undefined))
+      const detach = vi.fn(async () => undefined)
+      const page = {
+        once: vi.fn(),
+        off: vi.fn(),
+        isClosed: vi.fn(() => false),
+        bringToFront: vi.fn(async () => undefined),
+        context: vi.fn(() => ({
+          newCDPSession: vi.fn(async () => ({ send, detach }))
+        }))
+      }
+      const capture = captureTargetScreenshot(page as never)
+      const rejected = expect(capture).rejects.toThrow(
+        'BACKEND_UNAVAILABLE: CDP target capture timed out.'
+      )
+
+      await vi.advanceTimersByTimeAsync(9_999)
+      expect(detach).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      await rejected
+      expect(detach).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('rejects non-loopback browser debugging endpoints before connecting', () => {
     expect(() => createPlaywrightCdpDriver(['http://192.0.2.10:9222'])).toThrow(
       'CDP endpoint must be loopback-only.'
