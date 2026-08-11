@@ -34,10 +34,12 @@ _UIA_BACKEND_GUIDANCE = (
     "is exposed, use interact or terminate with failure instead of guessing."
 )
 _CDP_BACKEND_GUIDANCE = (
-    "The active backend is browser-cdp. When the supplied semantic tree contains a control, "
-    "use that control's normalized 0-1000 center as the action coordinate; do not guess from "
-    "an unavailable screenshot. After acting, use the next semantic tree to confirm the requested "
-    "UI state before terminating with success."
+    "The active backend is browser-cdp. The latest non-empty semantic tree is the canonical, "
+    "target-bound visible state: inspect it and never claim that canonical visible state is "
+    "unavailable while it is present. When the tree contains a control, use that control's "
+    "normalized 0-1000 center as the action coordinate; do not guess from an unavailable "
+    "screenshot. After acting, use the next semantic tree to continue the requested workflow and "
+    "confirm its final UI state before terminating with success."
 )
 _MODEL_RETRY_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
 

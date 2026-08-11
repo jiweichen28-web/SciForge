@@ -1,7 +1,12 @@
 from PIL import Image
 
 from cua import owl_agent
-from cua.runner import _UIA_BACKEND_GUIDANCE, _result_semantic_tree, _semantic_context
+from cua.runner import (
+    _CDP_BACKEND_GUIDANCE,
+    _UIA_BACKEND_GUIDANCE,
+    _result_semantic_tree,
+    _semantic_context,
+)
 
 
 def test_uia_semantic_tree_enters_current_model_turn_with_backend_constraints():
@@ -44,6 +49,12 @@ def test_non_semantic_observation_does_not_change_legacy_or_cdp_prompt():
 
     assert messages[0]["content"] == owl_agent.SYSTEM_PROMPT
     assert all("semantic tree" not in part.get("text", "") for part in messages[-1]["content"])
+
+
+def test_cdp_guidance_treats_nonempty_semantic_tree_as_canonical_visible_state():
+    assert "latest non-empty semantic tree" in _CDP_BACKEND_GUIDANCE
+    assert "never claim that canonical visible state is unavailable" in _CDP_BACKEND_GUIDANCE
+    assert "continue the requested workflow" in _CDP_BACKEND_GUIDANCE
 
 
 def test_semantic_context_is_bounded_and_rejects_non_tree_metadata():
