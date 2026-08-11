@@ -73,18 +73,25 @@ Wikipedia 首页 target 成功绑定并以 `browser-cdp`、`host-app-scoped` 观
 4. Web Task Lab 原先没有公开权威成功判据，测试提示可能漂移。v2 ready 契约为每个任务公开状态与语义文本 oracle。
 5. Agent 曾把 `target` 错放进 parallel child。运行时继续 strict 拒绝；MCP 工具描述与 JSON Schema 现在明确 child 只用 `sessionId` 引用 immutable binding，绝不在 child 重传 target。
 6. 动作完成后若下一次模型调用达到 deadline，`TIMEOUT` 错误原来丢失已发生动作的 trace。现在仍返回失败且不重试，但 error details 与 batch evidence 保留已有 steps、committed/verification、finalRevision 和 provider-redacted semanticTree。
+7. Windows 将 `port=0` 分配到 WHATWG Fetch 禁止端口时，loopback 服务虽已监听，Node `fetch` 仍会在发请求前报 `bad port`。问题先在 CDP adapter、后在 agent model bridge 复现。现在两者复用同一 Fetch-safe loopback helper：显式禁止端口失败关闭，系统分配命中禁止端口时关闭并有界重绑，避免复制端口表和双轨逻辑。
 
 ## 自动化与故障证据
 
 - 修复前真实 CDP 故障矩阵累计 99/100；唯一失败是高争用下只读 screenshot capture 超时。该失败不涉及动作重放。
 - 修复后真实 CDP 故障矩阵累计 550/550（55 轮 × 10 项）。覆盖真实 transport/auth、三目标并发、parent cancel、目标丢失幸存者、post-dispatch 丢包的 unknown outcome 和资源清理。一次尝试运行 50 轮的命令被外层 15 分钟工具预算截断，因无完整计数而没有并入 550 项。
 - 最新 partial trace 修复后真实 CDP/UIA/mixed 集成先单轮 18/18，再重复 5 轮 90/90，合计 108/108。
+- 后续组合 soak 前 4 轮 72/72，第 5 轮 CDP 10 项与 UIA 5 项通过、mixed 3 项均因共享 CDP fixture 发现不到 A/B/C 页面而失败。失败路径留下 2 个 test-owned Edge 根进程树（20 个进程）和 2 个 Temp profile；均按精确 PID/path 清理至 0。随后 cold mixed 3/3 通过且无残留。该组合失败不并入通过数，并作为 fixture/宿主压力下的可靠性缺口保留。
+- cold mixed 独立重复 20 轮的功能断言为 60/60，结束时进程/profile 也全部归零；但输出出现一次 Windows COM fatal exception `0x80010108`，栈位于 UIA resolve/open 与 CDP 并发期间，命令最终 exit 0。该批只能描述为“断言通过但伴随宿主/COM 稳定性警报”，不能算完全干净的生产稳定证据。
 - Python：255 passed, 21 skipped；Ruff F/E9 通过。
 - Python 全量 soak：前两轮 510/510 后，第 3 轮出现一次 Windows loopback `WinError 10053`；对应 model-access HTTP 用例随后 50/50 定向转绿。另一组全量确认首轮 255/255，第二轮出现一次 reaper failed-close retry 竞态（期望 `TIMEOUT`，实际 `REQUEST_NOT_FOUND`）；对应生命周期用例随后 100/100 定向转绿。两次低频失败均保留，不计为全量 soak 通过。
-- Computer Use domain：96 passed；typecheck 通过。
-- Web Task Lab：5 passed。
+- 收口阶段从正确 worker 包根再次完整运行 10 轮，全部为 255 passed、21 skipped，合计 2550/2550 非跳过项通过；这提高了后续重复运行信心，但不抹去前述两次低频失败。
+- 随后尝试的 100 轮外层 PowerShell soak 在约 8 分钟内没有返回第 1 轮摘要，受控终止且无 pytest 子进程残留，因此 0 轮计数；紧接着不经输出捕获直接复跑为 255 passed、21 skipped（8.42 秒）。证据只能说明测试可立即恢复，不能把无摘要的长命令计为通过或确定归因于产品。
+- Computer Use domain 在端口修复前为 96 passed，修复后为 97 passed；typecheck 通过。
+- 修复前首个 50 轮 domain soak 为 48/50 轮通过，第 22、42 轮仅得到 npm exit 1；该命令错误地丢弃了每轮 stdout，无法归因。保留失败尾部的下一组 20/20 轮通过；再一组 50 轮在第 8 轮复现 CDP adapter 的 3 项 `fetch failed / bad port`，该组为 49/50。adapter 修复后先 50/50；其后 250 轮在第 220 轮又复现 agent model bridge 的同类失败，该组 249/250。提升为共享 helper 后 100/100 轮、9700/9700 项通过。原始非零退出和测试编排缺口仍保留，不由修复后绿色复跑覆盖。
+- Web Task Lab：单轮 5 passed；收口契约 soak 100/100 轮、500/500 assertions。
 - managed multisession harness/evidence：9 passed。
 - Host gateway/Codex lifecycle：148 passed；扩展相关 Host 集合：153 passed。
+- 收口时额外扩大到 `runtime-mcp-tool-gateway.test.ts + src/main/runtime/codex`：290 passed、2 skipped、8 failed；核心 gateway 单文件独立复跑 25/25。8 项失败包括 4 个 Windows 无管理员 symlink fixture `EPERM`，以及 POSIX/macOS PATH、权限位和 shell hook 在 Windows 下的断言差异，未进入本轮 Computer Use 改动。该集合不计为全绿。
 - capability governance：17 packages / 175 actions，无架构旁路。
 - Node/Web/Domain SDK typecheck 通过；Electron main/preload/renderer build 通过。
 - 17/17 domain package 逐包 typecheck 通过。根 `npm run typecheck` 仍在已知 Windows 基线处停止：仓库随附 Workspace Host Node runtime 不可执行；前三个 agent-support build 已通过。聚合 `domain-packages:typecheck` 还会输出 `spawnSync npm.cmd EINVAL` 却错误返回 0，因此本报告只采用逐包真实结果。
@@ -120,5 +127,9 @@ Wikipedia 首页 target 成功绑定并以 `browser-cdp`、`host-app-scoped` 观
 6. `test(computer-use): align web task terminal oracles`
 7. `fix(computer-use): clarify parallel bound targets`
 8. `fix(computer-use): preserve partial timeout evidence`
+9. `fix(computer-use): avoid fetch-blocked adapter ports`
+10. `fix(computer-use): share fetch-safe loopback binding`
 
 测试结束时必须停止测试拥有的 SciForge/sidecar/router/Lab/Chromium 进程并核对端口、临时 profile、Git 状态。PR #62 与 PR #57 只做只读核对，不创建、更新或推送任何 PR。
+
+收口时已按核实的 PID 根精确停止 Lab/Edge、SciForge Electron、router、sidecar 和 plan gateway；排除查询命令自身后，2899/2900/3892/3893/3900/6792/6793 监听数为 0、测试运行/fixture 进程为 0、`sciforge-cua-cdp-*` profile 为 0，本轮 Lab 目录和唯一 Playwright profile 均已删除。历史 Playwright profile 未触碰。
