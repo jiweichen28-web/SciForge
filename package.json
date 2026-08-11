@@ -64,6 +64,8 @@
     "smoke:electron:packaged": "node ./scripts/electron-domain-packaged-smoke.mjs",
     "smoke:electron:packaged:build": "npm run dist:dir && npm run smoke:electron:packaged",
     "computer-use:multisession:harness": "tsx ./scripts/computer-use-managed-multisession-harness.ts",
+    "computer-use:web-task-lab": "tsx ./scripts/computer-use-web-task-lab.ts",
+    "computer-use:web-task-lab:test": "tsx --test ./scripts/computer-use-web-task-lab.test.ts",
     "computer-use:multisession:evidence": "tsx ./scripts/computer-use-multisession-evidence.ts",
     "computer-use:multisession:test": "tsx --test ./scripts/computer-use-managed-multisession-harness.test.ts ./scripts/computer-use-multisession-evidence.test.ts",
     "smoke:dataset-api:real": "node --import tsx ./scripts/dataset-api-real-smoke.mjs --public",
