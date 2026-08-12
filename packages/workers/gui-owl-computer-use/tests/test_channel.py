@@ -107,6 +107,13 @@ def test_channel_surfaces_unknown_action_outcome_as_non_retryable_classification
     with pytest.raises(ChannelError) as caught:
         channel.perform({"action": "write", "value": "maybe"}, expected_revision=observation.revision)
     assert caught.value.code == "ACTION_OUTCOME_UNKNOWN"
+    assert caught.value.details["dispatchEntered"] is True
+    assert caught.value.details["adapterReceiptReceived"] is False
+    assert caught.value.details["requestId"] == "request-1"
+    assert caught.value.details["sessionId"] == "session-1"
+    assert caught.value.details["targetId"] == "target-1"
+    assert caught.value.details["phaseTimeline"][0]["stage"] == "backend_execution"
+    assert caught.value.details["phaseTimeline"][0]["status"] == "failed"
     channel.close("outcome_unknown")
 
 

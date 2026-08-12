@@ -168,6 +168,22 @@ class SessionInputChannel:
                 details={"expectedRevision": expected_revision, "latestRevision": before.revision if before else None},
             )
         action_id = f"action-{uuid.uuid4()}"
+        dispatch_started_wall = time.time()
+        dispatch_started_mono = time.monotonic()
+        phase_timeline: list[dict[str, Any]] = []
+
+        def finish_phase(stage: str, started_wall: float, started_mono: float, status: str) -> None:
+            completed_wall = time.time()
+            completed_mono = time.monotonic()
+            phase_timeline.append({
+                "stage": stage,
+                "status": status,
+                "startedAt": started_wall,
+                "completedAt": completed_wall,
+                "monotonicStartedMs": round(started_mono * 1000, 3),
+                "monotonicCompletedMs": round(completed_mono * 1000, 3),
+                "durationMs": round((completed_mono - started_mono) * 1000, 3),
+            })
         with self._state:
             self._check_available()
             self._in_flight += 1
@@ -181,7 +197,10 @@ class SessionInputChannel:
             raise
         receipt: ActionReceipt | None = None
         try:
+            backend_started_wall = time.time()
+            backend_started_mono = time.monotonic()
             receipt = self.backend.perform(self.handle, action, expected_revision)
+            finish_phase("backend_execution", backend_started_wall, backend_started_mono, "completed")
             if receipt.target_id != self.target.target_id:
                 raise ChannelError("TARGET_LOST", "backend receipt belongs to a different target")
             try:
@@ -189,7 +208,10 @@ class SessionInputChannel:
             except RegistryError as error:
                 if error.code != "INVALID_STATE_TRANSITION" or not self.cancelled:
                     raise
+            verification_started_wall = time.time()
+            verification_started_mono = time.monotonic()
             evidence = self.backend.verify(self.handle, action, receipt, before)
+            finish_phase("verification", verification_started_wall, verification_started_mono, "completed")
             if evidence.target_id != self.target.target_id:
                 raise ChannelError("TARGET_LOST", "verification belongs to a different target")
             self.last_verification = evidence.status
@@ -219,6 +241,12 @@ class SessionInputChannel:
                 evidence={**dict(receipt.backend_evidence), **dict(evidence.details)},
             )
         except BackendOperationError as error:
+            if receipt is None:
+                finish_phase("backend_execution", backend_started_wall, backend_started_mono, "failed")
+            else:
+                finish_phase(
+                    "verification", verification_started_wall, verification_started_mono, "failed"
+                )
             if error.may_have_taken_effect:
                 # A more specific transport/target code must never weaken the
                 # unknown-outcome contract after dispatch may have occurred.
@@ -226,7 +254,24 @@ class SessionInputChannel:
                 raise ChannelError(
                     "ACTION_OUTCOME_UNKNOWN",
                     "backend action may have taken effect but its outcome is unknown",
-                    details={"backendCode": error.code},
+                    details={
+                        "backendCode": error.code,
+                        "actionId": receipt.action_id if receipt else action_id,
+                        "action": action_name,
+                        "dispatchEntered": True,
+                        "adapterReceiptReceived": receipt is not None,
+                        "committed": receipt.committed if receipt else False,
+                        "mayHaveTakenEffect": True,
+                        "requestId": self.request_id,
+                        "sessionId": self.session_id,
+                        "targetId": self.target.target_id,
+                        "expectedRevision": expected_revision,
+                        "phaseTimeline": phase_timeline,
+                        "dispatch": {
+                            "startedAt": dispatch_started_wall,
+                            "monotonicStartedMs": round(dispatch_started_mono * 1000, 3),
+                        },
+                    },
                 ) from error
             raise ChannelError(error.code or "ACTION_UNSUPPORTED", str(error)) from error
         finally:

@@ -520,6 +520,16 @@ def test_model_deadline_preserves_committed_partial_trace(monkeypatch, tmp_path)
     assert details["stepCount"] == 1
     assert details["steps"][0]["outcome"]["committed"] is True
     assert details["finalObservation"]["revision"] == "fake:1"
+    assert [item["stage"] for item in details["stageTimeline"]] == [
+        "observe", "planner_wait", "action_dispatch", "readback", "planner_wait",
+    ]
+    assert all(
+        item["monotonicStartedMs"] <= item["monotonicCompletedMs"]
+        and item["requestId"] == "request-partial-deadline"
+        and item["sessionId"] == "session-1"
+        and item["targetId"] == "target-1"
+        for item in details["stageTimeline"]
+    )
     assert backend.read("target-1") == ("alpha",)
     assert service.registry.snapshot_counts()["activeLeases"] == 0
     assert backend.open_handle_count == 0
@@ -527,6 +537,15 @@ def test_model_deadline_preserves_committed_partial_trace(monkeypatch, tmp_path)
 
 def test_action_unknown_returns_error_and_still_cleans_every_resource(monkeypatch, tmp_path):
     backend = FakeBackend(actions=("observe", "type"), fail_action_target="target-1")
+    perform_calls = 0
+    original_perform = backend.perform
+
+    def counted_perform(*args, **kwargs):
+        nonlocal perform_calls
+        perform_calls += 1
+        return original_perform(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "perform", counted_perform)
     service = ComputerUseService(router=BackendRouter([backend]))
     bind(service)
     monkeypatch.setattr(
@@ -547,6 +566,21 @@ def test_action_unknown_returns_error_and_still_cleans_every_resource(monkeypatc
     )
     assert result["error"]["code"] == "ACTION_OUTCOME_UNKNOWN"
     assert result["error"]["retryable"] is False
+    details = result["error"]["details"]
+    assert details["stepCount"] == 1
+    assert details["steps"][0]["outcome"]["mayHaveTakenEffect"] is True
+    assert details["steps"][0]["outcome"]["verification"] == "unknown"
+    assert details["steps"][0]["unknownReadback"]["completed"] is True
+    assert details["unknownOutcome"]["dispatchEntered"] is True
+    assert details["unknownOutcome"]["adapterReceiptReceived"] is False
+    assert details["unknownOutcome"]["requestId"] == "request-unknown"
+    assert details["unknownOutcome"]["sessionId"] == "session-1"
+    assert details["unknownOutcome"]["targetId"] == "target-1"
+    assert [item["stage"] for item in details["stageTimeline"]] == [
+        "observe", "planner_wait", "action_dispatch", "unknown_readback",
+    ]
+    assert backend.read("target-1") == ()
+    assert perform_calls == 1
     assert service.registry.snapshot_counts()["activeLeases"] == 0
     assert backend.open_handle_count == 0
 

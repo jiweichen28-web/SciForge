@@ -557,7 +557,32 @@ def _run_loop(
     artifact_run: ArtifactRun,
     started: float,
 ) -> tuple[Dict[str, Any], str]:
+    stage_timeline: List[Dict[str, Any]] = []
+
+    def start_stage(stage: str, step: int | None = None) -> tuple[float, float, int | None]:
+        return time.time(), time.monotonic(), step
+
+    def finish_stage(token: tuple[float, float, int | None], stage: str, status: str) -> None:
+        wall_started, mono_started, step = token
+        wall_completed = time.time()
+        mono_completed = time.monotonic()
+        stage_timeline.append({
+            "stage": stage,
+            "status": status,
+            **({"step": step} if step is not None else {}),
+            "startedAt": _iso_time(wall_started),
+            "completedAt": _iso_time(wall_completed),
+            "monotonicStartedMs": round(mono_started * 1000, 3),
+            "monotonicCompletedMs": round(mono_completed * 1000, 3),
+            "durationMs": round((mono_completed - mono_started) * 1000, 3),
+            "requestId": channel.request_id,
+            "sessionId": channel.session_id,
+            "targetId": channel.target.target_id,
+        })
+
+    initial_observe_stage = start_stage("observe")
     first = channel.observe()
+    finish_stage(initial_observe_stage, "observe", "completed")
     image = first.image
     observation_metadata = first.metadata
     latest_revision = first.revision
@@ -592,6 +617,7 @@ def _run_loop(
                 "revision": latest_revision,
                 "semanticTree": _result_semantic_tree(observation_metadata),
             },
+            "stageTimeline": stage_timeline,
         }
 
     for index in range(cfg.max_steps):
@@ -632,6 +658,7 @@ def _run_loop(
                 )
             timeout = min(120.0, remaining) if remaining is not None else 120.0
             try:
+                planner_stage = start_stage("planner_wait", index)
                 with channel.activity():
                     output_text = owl_agent.call_owl(
                         cfg.model_router_base_url,
@@ -649,8 +676,10 @@ def _run_loop(
                             else None
                         ),
                     )
+                finish_stage(planner_stage, "planner_wait", "completed")
                 break
             except Exception as error:  # noqa: BLE001
+                finish_stage(planner_stage, "planner_wait", "failed")
                 if isinstance(error, ChannelError):
                     raise
                 remaining = channel.remaining_seconds
@@ -764,7 +793,45 @@ def _run_loop(
         before_image = image
         prepared = _prepare_action(args, width, height)
         action_started = time.time()
-        outcome = channel.perform(prepared, expected_revision=latest_revision)
+        dispatch_stage = start_stage("action_dispatch", index)
+        try:
+            outcome = channel.perform(prepared, expected_revision=latest_revision)
+        except ChannelError as error:
+            finish_stage(dispatch_stage, "action_dispatch", "failed")
+            if error.code != "ACTION_OUTCOME_UNKNOWN":
+                raise
+            # Never retry or replay an uncertain write. One bounded, target-scoped
+            # observation is allowed solely to preserve post-failure evidence; it
+            # must not change the protocol error into success or verified.
+            step_rec["executed"] = False
+            step_rec["outcome"] = {
+                "committed": bool(error.details.get("committed", False)),
+                "mayHaveTakenEffect": True,
+                "verification": "unknown",
+                "evidence": dict(error.details),
+            }
+            readback_stage = start_stage("unknown_readback", index)
+            try:
+                readback = channel.observe()
+                image, latest_revision = readback.image, readback.revision
+                observation_metadata = readback.metadata
+                finish_stage(readback_stage, "unknown_readback", "completed")
+                step_rec["unknownReadback"] = {
+                    "completed": True,
+                    "revision": latest_revision,
+                    "semanticTree": _result_semantic_tree(observation_metadata),
+                }
+            except ChannelError as readback_error:
+                finish_stage(readback_stage, "unknown_readback", "failed")
+                step_rec["unknownReadback"] = {
+                    "completed": False,
+                    "errorCode": readback_error.code,
+                }
+            steps.append(step_rec)
+            details = partial_trace("action_outcome_unknown")
+            details["unknownOutcome"] = dict(error.details)
+            raise ChannelError(error.code, str(error), details=details) from error
+        finish_stage(dispatch_stage, "action_dispatch", "completed")
         action_completed = time.time()
         step_rec["executed"] = outcome.committed
         step_rec["outcome"] = outcome.to_dict()
@@ -772,7 +839,9 @@ def _run_loop(
             "actionStartedAt": _iso_time(action_started),
             "actionCompletedAt": _iso_time(action_completed),
         }
+        readback_stage = start_stage("readback", index)
         observation = channel.observe()
+        finish_stage(readback_stage, "readback", "completed")
         after_image, latest_revision = observation.image, observation.revision
         observation_metadata = observation.metadata
 
