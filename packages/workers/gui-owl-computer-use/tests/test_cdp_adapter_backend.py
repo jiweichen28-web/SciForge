@@ -45,6 +45,7 @@ class AdapterSession:
         self.recovery_started: threading.Event | None = None
         self.allow_recovery: threading.Event | None = None
         self.invalid_action_generation = False
+        self.non_object_action_response = False
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
@@ -96,6 +97,8 @@ class AdapterSession:
         if path == "/action":
             if self.fail_action:
                 raise TimeoutError("response lost")
+            if self.non_object_action_response:
+                return Response(["unexpected"])
             return Response({"ok": True, "data": {
                 "targetId": "page-1",
                 "generation": "wrong-generation" if self.invalid_action_generation else "generation-1",
@@ -340,6 +343,27 @@ def test_action_transport_failure_is_unknown_and_never_safe_to_replay():
     with pytest.raises(BackendOperationError) as caught:
         backend.perform(handle, {"action": "click", "coordinate": [1, 2]}, before.revision)
     assert caught.value.may_have_taken_effect is True
+    assert caught.value.code == "ACTION_TRANSPORT_FAILED"
+    assert caught.value.details == {
+        "transportStage": "awaiting-action-response",
+        "adapterResponseReceived": False,
+        "requestMayHaveReachedAdapter": True,
+    }
+
+
+def test_invalid_action_response_is_distinct_from_missing_response():
+    backend, handle, session = backend_and_handle()
+    before = backend.observe(handle)
+    session.non_object_action_response = True
+    with pytest.raises(BackendOperationError) as caught:
+        backend.perform(handle, {"action": "click", "coordinate": [1, 2]}, before.revision)
+    assert caught.value.may_have_taken_effect is True
+    assert caught.value.code == "ACTION_TRANSPORT_FAILED"
+    assert caught.value.details == {
+        "transportStage": "parsing-action-response",
+        "adapterResponseReceived": True,
+        "requestMayHaveReachedAdapter": True,
+    }
 
 
 def test_invalid_action_identity_is_unknown_and_cannot_be_reported_as_success():

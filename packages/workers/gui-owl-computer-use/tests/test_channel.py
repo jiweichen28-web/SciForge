@@ -123,6 +123,7 @@ def test_channel_never_downgrades_post_dispatch_target_loss_to_safe_retry():
     def lost_after_dispatch(_handle, _action, _revision):
         raise BackendOperationError(
             "target closed after dispatch", code="TARGET_LOST", may_have_taken_effect=True,
+            details={"transportStage": "adapter-response", "adapterResponseReceived": True},
         )
 
     backend.perform = lost_after_dispatch
@@ -135,4 +136,7 @@ def test_channel_never_downgrades_post_dispatch_target_loss_to_safe_retry():
         )
     assert caught.value.code == "ACTION_OUTCOME_UNKNOWN"
     assert caught.value.details["backendCode"] == "TARGET_LOST"
+    assert caught.value.details["backendDetails"] == {
+        "transportStage": "adapter-response", "adapterResponseReceived": True,
+    }
     channel.close("outcome_unknown")

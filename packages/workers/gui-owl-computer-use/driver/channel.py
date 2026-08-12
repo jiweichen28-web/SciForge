@@ -256,6 +256,7 @@ class SessionInputChannel:
                     "backend action may have taken effect but its outcome is unknown",
                     details={
                         "backendCode": error.code,
+                        "backendDetails": dict(error.details),
                         "actionId": receipt.action_id if receipt else action_id,
                         "action": action_name,
                         "dispatchEntered": True,

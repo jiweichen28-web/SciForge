@@ -75,6 +75,7 @@ class BackendOperationError(RuntimeError):
         may_have_taken_effect: bool = False,
         code: str | None = None,
         safe_to_retry: bool = False,
+        details: Mapping[str, Any] | None = None,
     ):
         super().__init__(message)
         self.may_have_taken_effect = may_have_taken_effect
@@ -83,6 +84,7 @@ class BackendOperationError(RuntimeError):
         # proves that no handle or external resource was created. Generic
         # exceptions default to quarantine rather than optimistic rerouting.
         self.safe_to_retry = safe_to_retry
+        self.details = dict(details or {})
 
 
 @runtime_checkable

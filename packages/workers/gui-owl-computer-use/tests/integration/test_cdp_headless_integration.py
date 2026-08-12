@@ -22,6 +22,8 @@ import pytest
 import requests
 
 from cua import result as R
+from cua.config import Config
+from cua.runner import run_task
 from cua.service import ComputerUseService
 from driver.backends.cdp_adapter import CdpAdapterBackend
 from driver.channel import ChannelError
@@ -713,7 +715,9 @@ def test_attached_driver_shutdown_disconnects_without_closing_browser(cdp_stack:
     assert {page["id"] for page in stack.pages.values()} <= live_ids
 
 
-def test_post_dispatch_transport_loss_is_unknown_and_not_replayed(cdp_stack: CdpStack) -> None:
+def test_post_dispatch_transport_loss_is_unknown_and_not_replayed(
+    cdp_stack: CdpStack, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     """A test-owned proxy drops exactly one response after the real action commits."""
     stack = cdp_stack
     dropped = threading.Event()
@@ -774,32 +778,67 @@ def test_post_dispatch_transport_loss_is_unknown_and_not_replayed(cdp_stack: Cdp
         target = _targets_by_name(stack)["A"]
         service = ComputerUseService(router=BackendRouter([backend]))
 
-        def execute(_request, channel):
-            first = channel.observe()
-            channel.perform(
-                {"action": "click", "coordinate": [260, 145]},
-                expected_revision=first.revision,
+        planner_calls = 0
+
+        def deterministic_planner(*_args: object, **_kwargs: object) -> str:
+            nonlocal planner_calls
+            planner_calls += 1
+            if planner_calls == 1:
+                # The controlled fixture viewport is 900x680; this normalized
+                # coordinate maps to the same editor point used by the direct
+                # channel integration path above.
+                return '<tool_call>{"arguments":{"action":"left_click","coordinate":[289,213]}}</tool_call>'
+            if planner_calls == 2:
+                return '<tool_call>{"arguments":{"action":"hotkey","keys":["ctrl","a"]}}</tool_call>'
+            return (
+                '<tool_call>{"arguments":{"action":"type",'
+                '"text":"committed-without-response"}}</tool_call>'
             )
-            focused = channel.observe()
-            channel.perform(
-                {"action": "hotkey", "keys": ["ctrl", "a"]},
-                expected_revision=focused.revision,
-            )
-            selected = channel.observe()
-            channel.perform(
-                {"action": "type", "text": "committed-without-response"},
-                expected_revision=selected.revision,
-            )
-            raise AssertionError("lost action response must not be reported as success")
+
+        monkeypatch.setattr("cua.runner.owl_agent.call_owl", deterministic_planner)
+        cfg = Config()
+        cfg.artifact_dir = str(tmp_path)
+        cfg.max_steps = 4
+        cfg.allow_execute = True
+        cfg.show_overlay = False
+        cfg.reflect = False
 
         result = service.run({
             "instruction": "inject post-dispatch response loss",
             "target": target.to_dict(),
             "requestId": "cdp-post-dispatch-loss",
-        }, execute)
-        assert dropped.wait(timeout=5)
+        }, lambda request, channel: run_task(
+            cfg, request["instruction"], channel, execute=True, approve=True,
+        ))
+        assert dropped.wait(timeout=5), result
         assert result["error"]["code"] == "ACTION_OUTCOME_UNKNOWN"
         assert result["error"]["retryable"] is False
+        details = result["error"]["details"]
+        assert details["status"] == "action_outcome_unknown"
+        assert details["stepCount"] == 3
+        assert details["steps"][-1]["outcome"]["verification"] == "unknown"
+        assert details["steps"][-1]["unknownReadback"]["completed"] is True
+        assert details["unknownOutcome"]["dispatchEntered"] is True
+        assert details["unknownOutcome"]["adapterReceiptReceived"] is False
+        assert details["unknownOutcome"]["mayHaveTakenEffect"] is True
+        assert details["unknownOutcome"]["backendCode"] == "ACTION_TRANSPORT_FAILED"
+        assert details["unknownOutcome"]["backendDetails"] == {
+            "transportStage": "awaiting-action-response",
+            "adapterResponseReceived": False,
+            "requestMayHaveReachedAdapter": True,
+        }
+        assert details["finalObservation"]["revision"] == "cdp:7"
+        assert [item["stage"] for item in details["stageTimeline"]] == [
+            "observe", "planner_wait", "action_dispatch", "readback",
+            "planner_wait", "action_dispatch", "readback", "planner_wait",
+            "action_dispatch", "unknown_readback",
+        ]
+        assert all(
+            item["monotonicStartedMs"] <= item["monotonicCompletedMs"]
+            and item["requestId"] == "cdp-post-dispatch-loss"
+            and item["targetId"] == target.target_id
+            for item in details["stageTimeline"]
+        )
         _wait_until(
             lambda: stack.state.snapshot()["A"]["text"] == "committed-without-response",
             timeout_s=5,

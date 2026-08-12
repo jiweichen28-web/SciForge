@@ -39,6 +39,14 @@ class CdpAdapterResponseError(RuntimeError):
         self.safe_to_retry = safe_to_retry
 
 
+class CdpAdapterTransportError(RuntimeError):
+    """Failure before a valid adapter protocol response was decoded."""
+
+    def __init__(self, message: str, *, response_received: bool) -> None:
+        super().__init__(message)
+        self.response_received = response_received
+
+
 @dataclass
 class CdpAdapterHandle:
     target: TargetDescriptor
@@ -357,9 +365,33 @@ class CdpAdapterBackend:
             if error.code == "TARGET_LOST":
                 raise BackendOperationError(
                     str(error), code="TARGET_LOST", may_have_taken_effect=True,
+                    details={
+                        "transportStage": "adapter-response",
+                        "adapterResponseReceived": True,
+                    },
                 ) from error
             raise BackendOperationError(
-                f"CDP adapter action failed: {error}", may_have_taken_effect=True,
+                f"CDP adapter action failed: {error}",
+                code=error.code,
+                may_have_taken_effect=True,
+                details={
+                    "transportStage": "adapter-response",
+                    "adapterResponseReceived": True,
+                },
+            ) from error
+        except CdpAdapterTransportError as error:
+            raise BackendOperationError(
+                f"CDP adapter action failed: {error}",
+                code="ACTION_TRANSPORT_FAILED",
+                may_have_taken_effect=True,
+                details={
+                    "transportStage": (
+                        "parsing-action-response"
+                        if error.response_received else "awaiting-action-response"
+                    ),
+                    "adapterResponseReceived": error.response_received,
+                    "requestMayHaveReachedAdapter": True,
+                },
             ) from error
         except Exception as error:
             raise BackendOperationError(
@@ -458,13 +490,20 @@ class CdpAdapterBackend:
                 timeout=self.timeout_s if timeout_s is None else timeout_s,
             )
         except Exception as error:
-            raise RuntimeError("CDP adapter transport is unavailable") from error
+            raise CdpAdapterTransportError(
+                "CDP adapter transport is unavailable", response_received=False,
+            ) from error
         try:
             payload = response.json()
         except Exception as error:
-            raise RuntimeError(f"CDP adapter returned non-JSON HTTP {response.status_code}") from error
+            raise CdpAdapterTransportError(
+                f"CDP adapter returned non-JSON HTTP {response.status_code}",
+                response_received=True,
+            ) from error
         if not isinstance(payload, dict):
-            raise RuntimeError("CDP adapter returned a non-object response")
+            raise CdpAdapterTransportError(
+                "CDP adapter returned a non-object response", response_received=True,
+            )
         if response.status_code >= 400 or payload.get("ok") is False:
             error_value = payload.get("error")
             message = error_value.get("message") if isinstance(error_value, dict) else None
