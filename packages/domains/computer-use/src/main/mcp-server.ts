@@ -2,37 +2,45 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { computerUseV1InputSchema } from '../contract.js'
 import {
+  computerUseBindTargetInputSchema,
+  computerUseEmptyInputSchema,
+  computerUseReleaseSessionInputSchema,
+  computerUseRunInputSchema
+} from '../contract.js'
+import {
+  COMPUTER_USE_BIND_TARGET_TOOL_NAME,
+  COMPUTER_USE_GET_CAPABILITIES_TOOL_NAME,
+  COMPUTER_USE_LIST_TARGETS_TOOL_NAME,
   COMPUTER_USE_MCP_LAUNCH_FLAG,
   COMPUTER_USE_MCP_TOOL_NAME,
+  COMPUTER_USE_RELEASE_SESSION_TOOL_NAME,
   GUI_COMPUTER_USE_MCP_SERVER_NAME
 } from './mcp-config.js'
 
 const TRUSTED_INVOCATION_METADATA_KEY = 'io.sciforge/computer-use-invocation'
+const DEFAULT_TIMEOUT_MS = 600_000
 
-type ComputerUseToolResult = CallToolResult & {
+type ToolResult = CallToolResult & {
   content: Array<{ type: 'text'; text: string }>
   structuredContent?: Record<string, unknown>
   isError?: true
 }
 
-type ComputerUseServiceConfig = {
-  serviceUrl: string
-  serviceToken: string
-  timeoutMs: number
-}
+type ServiceConfig = { serviceUrl: string; serviceToken: string; timeoutMs: number }
+type TrustedInvocation = Readonly<{
+  requestId: string
+  runtimeId: string
+  threadId: string
+  actionId: string
+  invocationId: string
+  approval: 'confirmation'
+}>
 
-const DEFAULT_TIMEOUT_MS = 600_000
-
-export type StartComputerUseMcpServerOptions = {
-  transport?: Transport
-  env?: NodeJS.ProcessEnv
-}
+export type StartComputerUseMcpServerOptions = { transport?: Transport; env?: NodeJS.ProcessEnv }
 
 export async function runComputerUseMcpServerFromArgv(
-  argv: string[],
-  options: StartComputerUseMcpServerOptions = {}
+  argv: string[], options: StartComputerUseMcpServerOptions = {}
 ): Promise<boolean> {
   if (!argv.includes(COMPUTER_USE_MCP_LAUNCH_FLAG)) return false
   await startComputerUseMcpServer(options)
@@ -47,47 +55,123 @@ export async function startComputerUseMcpServer(
 }
 
 export function createComputerUseMcpServer(
-  config: ComputerUseServiceConfig | null = resolveComputerUseServiceConfig()
+  config: ServiceConfig | null = resolveComputerUseServiceConfig()
 ): McpServer {
   const server = new McpServer(
-    { name: GUI_COMPUTER_USE_MCP_SERVER_NAME, version: '0.1.0' },
+    { name: GUI_COMPUTER_USE_MCP_SERVER_NAME, version: '0.2.0' },
     { capabilities: { logging: {} } }
   )
   if (!config) return server
 
+  server.registerTool(COMPUTER_USE_GET_CAPABILITIES_TOOL_NAME, {
+    description: 'Read target-scoped Computer Use backend capabilities.',
+    inputSchema: computerUseEmptyInputSchema,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async (_args, extra) => callService(config, 'GET', '/computer-use/capabilities', undefined, extra.signal))
+
+  server.registerTool(COMPUTER_USE_LIST_TARGETS_TOOL_NAME, {
+    description: 'List redacted browser-page targets currently owned by configured CDP adapters.',
+    inputSchema: computerUseEmptyInputSchema,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async (_args, extra) => callService(config, 'GET', '/computer-use/targets', undefined, extra.signal))
+
+  server.registerTool(COMPUTER_USE_BIND_TARGET_TOOL_NAME, {
+    description: 'Bind one canonical browser page as a target-scoped Computer Use session.',
+    inputSchema: computerUseBindTargetInputSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  }, async (args, extra) => mutation(config, '/computer-use/sessions/bind', args, extra._meta, extra.signal))
+
   server.registerTool(COMPUTER_USE_MCP_TOOL_NAME, {
     description: [
-      'Control the user\'s real desktop through the host-approved GUI-Owl worker.',
-      'Backend: Legacy/PyAutoGUI. Isolation: host-approved. Lease: process-global.',
-      'Provide one natural-language instruction. Host input is process-global and cannot overlap.',
+      'Execute one instruction.',
+      'Omit computerUseSessionId for Backend: Legacy/PyAutoGUI. Isolation: host-approved. Lease: process-global.',
+      'Provide a bound computerUseSessionId for Backend: browser-cdp. Isolation: host-app-scoped.',
       'Returns a ServiceResult trace; the caller must verify task completion.'
     ].join(' '),
-    inputSchema: computerUseV1InputSchema,
-    annotations: {
-      title: 'Computer use',
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: true
-    }
-  }, async (args, extra) => {
-    const parsed = computerUseV1InputSchema.safeParse(args)
-    if (!parsed.success) return errorToolResult('INVALID_ARGUMENT', 'instruction is required')
-    const trusted = parseTrustedInvocation(extra._meta)
-    if (!trusted) {
-      return errorToolResult(
-        'APPROVAL_PROOF_REQUIRED',
-        'Computer Use requires one trusted, confirmed Host invocation.'
-      )
-    }
-    return callComputerUseService(config, parsed.data.instruction, trusted, extra.signal)
-  })
+    inputSchema: computerUseRunInputSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  }, async (args, extra) => mutation(config, '/computer-use/run', args, extra._meta, extra.signal, true))
+
+  server.registerTool(COMPUTER_USE_RELEASE_SESSION_TOOL_NAME, {
+    description: 'Release a bound target session and its adapter handle.',
+    inputSchema: computerUseReleaseSessionInputSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async (args, extra) => mutation(config, '/computer-use/sessions/release', args, extra._meta, extra.signal))
   return server
+}
+
+async function mutation(
+  config: ServiceConfig,
+  path: string,
+  args: Record<string, unknown>,
+  meta: Record<string, unknown> | undefined,
+  signal: AbortSignal,
+  cancelOnAbort = false
+): Promise<ToolResult> {
+  const trusted = parseTrustedInvocation(meta)
+  if (!trusted) return errorToolResult(
+    'APPROVAL_PROOF_REQUIRED', 'Computer Use mutation requires one trusted, confirmed Host invocation.'
+  )
+  return callService(config, 'POST', path, {
+    ...args,
+    ...(path === '/computer-use/run' ? { execute: true, approve: true } : {}),
+    requestId: trusted.requestId,
+    invocation: trusted
+  }, signal, cancelOnAbort ? trusted.requestId : undefined)
+}
+
+async function callService(
+  config: ServiceConfig,
+  method: 'GET' | 'POST',
+  path: string,
+  body: Record<string, unknown> | undefined,
+  signal: AbortSignal,
+  cancelRequestId?: string
+): Promise<ToolResult> {
+  const controller = new AbortController()
+  const cancel = (): void => {
+    if (!cancelRequestId) return
+    void fetch(`${config.serviceUrl}/computer-use/cancel`, {
+      method: 'POST', headers: jsonHeaders(config.serviceToken),
+      body: JSON.stringify({ requestId: cancelRequestId }), redirect: 'error'
+    }).catch(() => undefined)
+  }
+  controller.signal.addEventListener('abort', cancel, { once: true })
+  const unlink = linkAbortSignal(signal, controller)
+  const timeout = setTimeout(() => controller.abort(new Error('Computer Use service timeout.')), config.timeoutMs)
+  try {
+    const response = await fetch(`${config.serviceUrl}${path}`, {
+      method,
+      headers: jsonHeaders(config.serviceToken),
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: controller.signal,
+      redirect: 'error'
+    })
+    const payload = await response.json().catch(() => null)
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return errorToolResult('BAD_RESPONSE', `Computer Use service returned non-JSON (HTTP ${response.status}).`)
+    }
+    const record = payload as Record<string, unknown>
+    const summary = serviceSummary(record, response.status, response.ok)
+    return {
+      content: [{ type: 'text', text: summary }],
+      structuredContent: record,
+      ...(record.ok === false || !response.ok ? { isError: true as const } : {})
+    }
+  } catch (error) {
+    return errorToolResult('UNAVAILABLE', controller.signal.aborted
+      ? 'Computer Use call timed out or was cancelled.'
+      : `Computer Use call failed: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    clearTimeout(timeout)
+    controller.signal.removeEventListener('abort', cancel)
+    unlink()
+  }
 }
 
 export function resolveComputerUseServiceConfig(
   env: NodeJS.ProcessEnv = process.env
-): ComputerUseServiceConfig | null {
+): ServiceConfig | null {
   const serviceUrl = (env.SCIFORGE_CUA_SERVICE_URL ?? '').trim().replace(/\/+$/, '')
   if (!/^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/i.test(serviceUrl)) return null
   const timeout = Number(env.SCIFORGE_CUA_SERVICE_TIMEOUT_MS)
@@ -98,130 +182,43 @@ export function resolveComputerUseServiceConfig(
   }
 }
 
-type TrustedInvocation = Readonly<{
-  requestId: string
-  runtimeId: string
-  threadId: string
-  actionId: string
-  invocationId: string
-  approval: 'confirmation'
-}>
-
 function parseTrustedInvocation(meta: Record<string, unknown> | undefined): TrustedInvocation | null {
   const value = meta?.[TRUSTED_INVOCATION_METADATA_KEY]
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const record = value as Record<string, unknown>
   if (record.approval !== 'confirmation') return null
-  const requestId = stringId(record.requestId)
-  const runtimeId = stringId(record.runtimeId)
-  const threadId = stringId(record.threadId)
-  const actionId = stringId(record.actionId)
-  const invocationId = stringId(record.invocationId)
-  if (!requestId || !runtimeId || !threadId || !actionId || !invocationId) return null
-  return { requestId, runtimeId, threadId, actionId, invocationId, approval: 'confirmation' }
+  const fields = ['requestId', 'runtimeId', 'threadId', 'actionId', 'invocationId'] as const
+  const values = Object.fromEntries(fields.map((field) => [field, stringId(record[field])])) as Record<typeof fields[number], string>
+  if (fields.some((field) => !values[field])) return null
+  return { ...values, approval: 'confirmation' }
 }
 
 function stringId(value: unknown): string {
-  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)
-    ? value
-    : ''
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value) ? value : ''
 }
 
-async function callComputerUseService(
-  config: ComputerUseServiceConfig,
-  instruction: string,
-  trusted: TrustedInvocation,
-  signal: AbortSignal
-): Promise<ComputerUseToolResult> {
-  const requestId = trusted.requestId
-  const controller = new AbortController()
-  const unlink = linkAbortSignal(signal, controller)
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs)
-  const cancel = (): void => {
-    void fetch(`${config.serviceUrl}/computer-use/cancel`, {
-      method: 'POST',
-      headers: jsonHeaders(config.serviceToken),
-      body: JSON.stringify({ requestId }),
-      redirect: 'error'
-    }).catch(() => undefined)
-  }
-  controller.signal.addEventListener('abort', cancel, { once: true })
-  try {
-    const response = await fetch(`${config.serviceUrl}/computer-use/run`, {
-      method: 'POST',
-      headers: jsonHeaders(config.serviceToken),
-      body: JSON.stringify({
-        instruction,
-        execute: true,
-        approve: true,
-        requestId,
-        invocation: trusted
-      }),
-      signal: controller.signal,
-      redirect: 'error'
-    })
-    const payload = await response.json().catch(() => null)
-    if (!payload || typeof payload !== 'object') {
-      return errorToolResult('BAD_RESPONSE', `computer-use service returned non-JSON (HTTP ${response.status})`)
-    }
-    const record = payload as Record<string, unknown>
-    const summary = sidecarResultSummary(record, response.status, response.ok)
-    return {
-      content: [{ type: 'text', text: summary }],
-      structuredContent: record,
-      ...(record.ok === false || !response.ok ? { isError: true as const } : {})
-    }
-  } catch (error) {
-    return errorToolResult(
-      'UNAVAILABLE',
-      controller.signal.aborted
-        ? 'computer-use call timed out or was cancelled'
-        : `computer-use call failed: ${error instanceof Error ? error.message : String(error)}`
-    )
-  } finally {
-    clearTimeout(timeout)
-    controller.signal.removeEventListener('abort', cancel)
-    unlink()
-  }
-}
-
-function sidecarResultSummary(
-  record: Record<string, unknown>,
-  status: number,
-  responseOk: boolean
-): string {
+function serviceSummary(record: Record<string, unknown>, status: number, ok: boolean): string {
   if (typeof record.summary === 'string' && record.summary.trim()) return record.summary
-  if (record.ok === false && record.error && typeof record.error === 'object') {
-    const error = record.error as Record<string, unknown>
-    const code = typeof error.code === 'string' && error.code.trim() ? error.code : 'UNKNOWN'
-    const message = typeof error.message === 'string' && error.message.trim()
-      ? error.message
-      : 'computer-use failed'
-    return `${code}: ${message}`
-  }
-  return responseOk ? 'computer-use run completed' : `computer-use failed (HTTP ${status})`
+  const error = record.error && typeof record.error === 'object' && !Array.isArray(record.error)
+    ? record.error as Record<string, unknown> : null
+  if (record.ok === false && error) return `${String(error.code ?? 'UNKNOWN')}: ${String(error.message ?? 'Computer Use failed')}`
+  return ok ? 'Computer Use operation completed.' : `Computer Use failed (HTTP ${status}).`
 }
 
-function jsonHeaders(serviceToken: string): Record<string, string> {
-  return {
-    'Content-Type': 'application/json',
-    ...(serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {})
-  }
+function jsonHeaders(token: string): Record<string, string> {
+  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }
 }
 
 function linkAbortSignal(signal: AbortSignal, controller: AbortController): () => void {
-  if (signal.aborted) {
-    controller.abort(signal.reason)
-    return () => undefined
-  }
+  if (signal.aborted) { controller.abort(signal.reason); return () => undefined }
   const abort = (): void => controller.abort(signal.reason)
   signal.addEventListener('abort', abort, { once: true })
   return () => signal.removeEventListener('abort', abort)
 }
 
-function errorToolResult(code: string, message: string): ComputerUseToolResult {
+function errorToolResult(code: string, message: string): ToolResult {
   return {
-    content: [{ type: 'text', text: message }],
+    content: [{ type: 'text', text: `${code}: ${message}` }],
     structuredContent: { ok: false, error: { code, message } },
     isError: true
   }

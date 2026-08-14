@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from PIL import Image
 
@@ -12,6 +12,24 @@ class BackendOpenContext:
     execute: bool
     settle_s: float
     screenshot_provider: Callable[[], Image.Image] | None
+    request_id: str = ""
+    target: Mapping[str, Any] | None = None
+    cancellation: Any = None
+
+
+class BackendOperationError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "BACKEND_UNAVAILABLE",
+        may_have_taken_effect: bool = False,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.may_have_taken_effect = may_have_taken_effect
+        self.details = dict(details or {})
 
 
 class InputBackend(Protocol):

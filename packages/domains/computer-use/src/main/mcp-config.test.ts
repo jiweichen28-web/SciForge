@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildComputerUseMcpArgs,
+  computerUseMcpEnabledTools,
   computerUseMcpEnv,
   isComputerUseMcpConfigured
 } from './mcp-config'
@@ -28,5 +29,15 @@ describe('domain-owned Computer Use MCP config', () => {
       execPath: '/app/sciforge',
       isPackaged: true
     })).toEqual(['/app/out/main/computer-use-mcp-node-entry.js', '--gui-owl-computer-use-mcp-server'])
+  })
+
+  it('advertises the complete PR3 target lifecycle surface', () => {
+    expect(computerUseMcpEnabledTools()).toEqual([
+      'computer_use_get_capabilities',
+      'computer_use_list_targets',
+      'computer_use_bind_target',
+      'computer_use',
+      'computer_use_release_session'
+    ])
   })
 })

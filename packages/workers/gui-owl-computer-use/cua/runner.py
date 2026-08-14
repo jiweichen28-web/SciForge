@@ -56,7 +56,7 @@ def run_task(
     try:
         return _run_loop(cfg, instruction, channel, bool(execute), run_dir, started)
     except ChannelError as error:
-        return R.err(error.code, str(error), prov=provenance)
+        return R.err(error.code, str(error), details=error.details or None, prov=provenance)
     except Exception as error:  # noqa: BLE001
         return R.err("INTERNAL_ERROR", f"runner failed: {error}", prov=provenance)
 
@@ -102,11 +102,15 @@ def _run_loop(
                 cfg.model_router_model,
                 cfg.model_router_api_key,
                 messages,
+                canonical_observation=channel.canonical_observation(),
             )
         except Exception as error:  # noqa: BLE001
-            status = "error"
-            steps.append({"step": index, "error": str(error)})
-            break
+            return R.err(
+                "BACKEND_UNAVAILABLE",
+                "Computer Use planner failed before action dispatch.",
+                details={"step": index, "plannerError": type(error).__name__},
+                prov=R.provenance("computer_use_run", channel.request_id, started),
+            )
         if channel.cancelled:
             status = "cancelled"
             break
@@ -167,6 +171,8 @@ def _run_loop(
         before_image = image
         channel.perform(args, width, height)
         step_record["executed"] = True
+        if channel.last_verification:
+            step_record["verification"] = dict(channel.last_verification)
         after_image = channel.observe()
         if cfg.reflect:
             try:

@@ -3,7 +3,11 @@ import type { AddressInfo } from 'node:net'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, describe, expect, it } from 'vitest'
-import { COMPUTER_USE_MCP_TOOL_NAME } from './mcp-config'
+import {
+  COMPUTER_USE_BIND_TARGET_TOOL_NAME,
+  COMPUTER_USE_MCP_TOOL_NAME,
+  COMPUTER_USE_RELEASE_SESSION_TOOL_NAME
+} from './mcp-config'
 import { createComputerUseMcpServer } from './mcp-server'
 
 const openServers: Array<{ close: () => Promise<void> }> = []
@@ -92,6 +96,51 @@ describe('domain-owned Computer Use MCP server', () => {
         invocation: trustedMeta['io.sciforge/computer-use-invocation']
       })
       expect(requests[0]?.requestId).toBe('request-1')
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  it('exposes five tools and protects bind/release with the same trusted identity', async () => {
+    const seen: Array<{ url: string; body: Record<string, unknown> }> = []
+    const sidecar = await startFakeSidecar(async (request, response) => {
+      seen.push({ url: request.url ?? '', body: await readJsonBody(request) })
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, data: { status: 'ok' } }))
+    })
+    const server = createComputerUseMcpServer({
+      serviceUrl: sidecar.url, serviceToken: 'sidecar-token', timeoutMs: 5_000
+    })
+    const client = new Client({ name: 'test', version: '0.1.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+      expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
+        'computer_use', 'computer_use_bind_target', 'computer_use_get_capabilities',
+        'computer_use_list_targets', 'computer_use_release_session'
+      ])
+      const denied = await client.callTool({
+        name: COMPUTER_USE_BIND_TARGET_TOOL_NAME,
+        arguments: { targetId: 'cdp:page-1' }
+      })
+      expect(denied.isError).toBe(true)
+      expect(seen).toHaveLength(0)
+      await client.callTool({
+        name: COMPUTER_USE_BIND_TARGET_TOOL_NAME,
+        arguments: { targetId: 'cdp:page-1' }, _meta: trustedMeta
+      })
+      await client.callTool({
+        name: COMPUTER_USE_RELEASE_SESSION_TOOL_NAME,
+        arguments: { computerUseSessionId: 'session-1' }, _meta: trustedMeta
+      })
+      expect(seen.map((entry) => entry.url)).toEqual([
+        '/computer-use/sessions/bind', '/computer-use/sessions/release'
+      ])
+      expect(seen[0]?.body).toMatchObject({
+        targetId: 'cdp:page-1', requestId: 'request-1',
+        invocation: trustedMeta['io.sciforge/computer-use-invocation']
+      })
     } finally {
       await client.close()
       await server.close()

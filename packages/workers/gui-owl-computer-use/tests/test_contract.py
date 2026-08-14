@@ -71,11 +71,30 @@ def test_owl_parsing_optional():
     assert owl_agent.to_screen([500, 250], 1000, 800) == (500, 200)
 
 
+def test_cdp_responses_function_call_and_schema_bounds_optional():
+    try:
+        from cua.owl_agent import _cdp_action_schema, _responses_output_text, extract_action
+    except Exception:  # noqa: BLE001
+        return
+    output = _responses_output_text({
+        "output_text": "",
+        "output": [{
+            "type": "function_call", "name": "computer_use",
+            "arguments": '{"action":"click","coordinate":[250,750]}',
+        }],
+    })
+    assert extract_action(output) == {"action": "click", "coordinate": [250, 750]}
+    coordinate = _cdp_action_schema()["oneOf"][0]["properties"]["coordinate"]
+    assert coordinate["minItems"] == coordinate["maxItems"] == 2
+    assert coordinate["items"]["minimum"] == 0
+    assert coordinate["items"]["maximum"] == 1000
+
+
 def test_build_messages_official_multiturn_optional():
     """Official GUI-Owl multi-turn: alternating roles, sliding 2-image window,
     task text retained in turn 0, older screenshots dropped. Skips if PIL absent."""
     try:
-        import io, tempfile, os as _os
+        import tempfile, os as _os
         from PIL import Image
         from cua import owl_agent
     except Exception:  # noqa: BLE001

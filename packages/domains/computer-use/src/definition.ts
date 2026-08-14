@@ -12,6 +12,9 @@ export const COMPUTER_USE_DOMAIN_MODULE_ID = domainPackageDefinition.module.id
 export const COMPUTER_USE_CAPABILITY_FACTORY_CONTRIBUTION = contributionFor(
   'main.capability-factory'
 )
+export const COMPUTER_USE_RUNTIME_LIFECYCLE_CONTRIBUTION = contributionFor(
+  'main.runtime-lifecycle'
+)
 export const COMPUTER_USE_RUNTIME_MCP_SERVER_CONTRIBUTION = contributionFor(
   'main.runtime-mcp-server'
 )

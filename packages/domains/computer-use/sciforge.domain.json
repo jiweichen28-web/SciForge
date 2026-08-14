@@ -28,6 +28,7 @@
       "export": "./main",
       "contributions": [
         { "kind": "main.capability-factory", "id": "computer-use.capabilities" },
+        { "kind": "main.runtime-lifecycle", "id": "computer-use.runtime-lifecycle" },
         { "kind": "main.runtime-mcp-server", "id": "computer-use.runtime-mcp-server" },
         { "kind": "main.mcp-trusted-invocation-metadata", "id": "computer-use.trusted-invocation-metadata" }
       ]

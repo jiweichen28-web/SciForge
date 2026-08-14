@@ -7,13 +7,14 @@ from typing import Any
 
 from PIL import Image
 
-from .backend import InputBackend
+from .backend import BackendOperationError, InputBackend
 
 
 class ChannelError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.details = dict(details or {})
 
 
 class SessionInputChannel:
@@ -31,6 +32,7 @@ class SessionInputChannel:
         self.handle = handle
         self._closed = False
         self._lock = threading.RLock()
+        self.last_verification: dict[str, Any] = {}
 
     @property
     def cancelled(self) -> bool:
@@ -52,8 +54,12 @@ class SessionInputChannel:
                 self.backend.perform(self.handle, action, width, height)
             except ChannelError:
                 raise
+            except BackendOperationError as error:
+                raise ChannelError(error.code, str(error), error.details) from error
             except Exception as error:  # noqa: BLE001
                 raise ChannelError("ACTION_OUTCOME_UNKNOWN", str(error)) from error
+            verification = getattr(self.backend, "verification", None)
+            self.last_verification = dict(verification(self.handle)) if callable(verification) else {}
             if self.cancelled:
                 raise ChannelError("CANCEL_PENDING", "request was cancelled after host input")
 
@@ -67,6 +73,23 @@ class SessionInputChannel:
                 return [str(error)]
             self._closed = True
             return []
+
+    def cancel_backend(self, reason: str) -> list[str]:
+        cancel = getattr(self.backend, "cancel", None)
+        if not callable(cancel):
+            return []
+        try:
+            cancel(self.handle, reason)
+            return []
+        except Exception as error:  # noqa: BLE001
+            return [str(error)]
+
+    def canonical_observation(self) -> dict[str, Any] | None:
+        metadata = getattr(self.backend, "observation_metadata", None)
+        if not callable(metadata):
+            return None
+        value = metadata(self.handle)
+        return dict(value) if isinstance(value, dict) else None
 
     def wait(self, seconds: float) -> None:
         end = time.monotonic() + max(0.0, min(float(seconds), 30.0))
