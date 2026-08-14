@@ -52,9 +52,48 @@ def test_service_result_to_mcp_err():
 
 
 def test_schemas_shape():
-    assert contract.RUN_INPUT_SCHEMA["required"] == ["instruction"]
+    assert contract.RUN_INPUT_SCHEMA["required"] == []
+    assert contract.RUN_INPUT_SCHEMA["oneOf"] == [
+        {"required": ["instruction"], "not": {"required": ["parallel"]}},
+        {"required": ["parallel"], "not": {"required": ["instruction"]}},
+    ]
     assert contract.CANCEL_INPUT_SCHEMA["required"] == ["requestId"]
     assert contract.TOOL_RUN == "gui_computer_use_run"
+
+
+def test_parallel_contract_is_bounded_unique_and_exclusive():
+    normalized = contract.normalize_run_input({
+        "parallel": [
+            {"instruction": "alpha", "computerUseSessionId": "session-a", "deadlineMs": 5000},
+            {"instruction": "beta", "computerUseSessionId": "session-b"},
+        ],
+        "execute": True,
+        "approve": True,
+    })
+    assert normalized["parallel"][0] == {
+        "instruction": "alpha", "computerUseSessionId": "session-a", "deadlineMs": 5000,
+    }
+    for invalid in (
+        {"parallel": [{"instruction": "only", "computerUseSessionId": "session-a"}]},
+        {"parallel": [
+            {"instruction": "alpha", "computerUseSessionId": "session-a"},
+            {"instruction": "beta", "computerUseSessionId": "session-a"},
+        ]},
+        {"instruction": "top", "parallel": [
+            {"instruction": "alpha", "computerUseSessionId": "session-a"},
+            {"instruction": "beta", "computerUseSessionId": "session-b"},
+        ]},
+        {"parallel": [
+            {"instruction": "alpha", "computerUseSessionId": "session a"},
+            {"instruction": "beta", "computerUseSessionId": "session-b"},
+        ]},
+    ):
+        try:
+            contract.normalize_run_input(invalid)
+        except ValueError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError("invalid parallel input should be rejected")
 
 
 def test_owl_parsing_optional():

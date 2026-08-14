@@ -66,7 +66,7 @@ uses Model Router policy.
 | Grounding model driver (prompt, call, parse, coord mapping) | `cua/owl_agent.py` |
 | Mobile-Agent-v3 reflector | `cua/reflector.py` |
 | Env-driven config | `cua/config.py` |
-| Session/request/process-global lease authority | `cua/session_registry.py` |
+| Session/request/target and process-global lease authority | `cua/session_registry.py` |
 | Service lifecycle authority | `cua/service.py` |
 | **MCP** stdio transport adapter | `cua/mcp_server.py` |
 | **HTTP** ServiceResult sidecar | `cua/server.py` |
@@ -88,7 +88,8 @@ below for the few unavoidable edits elsewhere in the app.
 - `computer_use_get_capabilities`
 - `computer_use_list_targets`
 - `computer_use_bind_target` — acquires one target-scoped session/lease
-- `computer_use` — stable `{ instruction }`, with an optional domain-managed session
+- `computer_use` — stable `{ instruction }`, one bound session, or a bounded
+  `parallel` batch of two to eight unique bound sessions
 - `computer_use_release_session`
 
 The worker-native stdio tools remain an internal compatibility/debug surface;
@@ -96,6 +97,16 @@ the application uses the domain-managed wrapper and Host-trusted approvals.
 
 The full machine-readable `ServiceResult` is returned as a compact JSON text
 block alongside a one-line summary; screenshots stay as artifact refs.
+
+Different bound CDP targets may run concurrently. Each target session permits
+one active child request, the Legacy backend keeps one process-global request,
+and parent/child cancellation never replays an action. Per-child `deadlineMs`
+returns a partial trace when planning times out. Runtime status exposes
+sessions, requests, active leases/channels/requests, cleanup pending, waiters
+(always zero because this runtime has no queue), and backend handles.
+
+The repeatable, test-owned headless-browser evidence procedure is documented in
+[`docs/computer-use-cdp-reliability-evidence.zh-CN.md`](../../../docs/computer-use-cdp-reliability-evidence.zh-CN.md).
 
 ## Run
 

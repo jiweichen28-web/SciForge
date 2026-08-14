@@ -50,15 +50,22 @@ describe.skipIf(!edge)('test-owned headless CDP page', () => {
       ])
       const endpoint = `http://127.0.0.1:${cdpPort}`
       const adapter = await startComputerUseCdpAdapter({ driver: createPlaywrightCdpDriver([endpoint]) })
-      const call = async (path: string, body?: Record<string, unknown>) => {
+      const rawCall = async (path: string, body?: Record<string, unknown>) => {
         const response = await fetch(`${adapter.url}/v1/${path}`, {
           method: body ? 'POST' : 'GET',
           headers: { Authorization: `Bearer ${adapter.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
           ...(body ? { body: JSON.stringify(body) } : {})
         })
-        const payload = await response.json() as { ok: boolean; data: Record<string, unknown> }
+        return await response.json() as {
+          ok: boolean
+          data?: Record<string, unknown>
+          error?: Record<string, unknown>
+        }
+      }
+      const call = async (path: string, body?: Record<string, unknown>) => {
+        const payload = await rawCall(path, body)
         expect(payload.ok).toBe(true)
-        return payload.data
+        return payload.data!
       }
       try {
         const listed = await call('targets')
@@ -73,6 +80,7 @@ describe.skipIf(!edge)('test-owned headless CDP page', () => {
         expect(targetB).toBeTruthy()
         expect(targetA?.targetId).not.toBe(targetB?.targetId)
         const opened = await call('handles/open', { target: targetA, requestId: 'request-a' })
+        const openedB = await call('handles/open', { target: targetB, requestId: 'request-b' })
         const first = await call('observe', { handleId: opened.handleId })
         expect(first).toMatchObject({ targetId: targetA!.targetId, revision: 'cdp:1' })
         const tree = (first.metadata as Record<string, unknown>).semanticTree as Array<Record<string, unknown>>
@@ -97,6 +105,13 @@ describe.skipIf(!edge)('test-owned headless CDP page', () => {
           error: { code: 'INVALID_ARGUMENT', safeToRetry: true }
         })
         expect(invalidPayload.error).not.toHaveProperty('mayHaveTakenEffect')
+        const stale = await rawCall('action', {
+          handleId: opened.handleId,
+          expectedRevision: 'cdp:0',
+          action: { action: 'click', coordinate: editor!.center }
+        })
+        expect(stale).toMatchObject({ ok: false, error: { code: 'STALE_OBSERVATION' } })
+        expect(stale.error).not.toHaveProperty('mayHaveTakenEffect')
         const clicked = await call('action', {
           handleId: opened.handleId,
           expectedRevision: first.revision,
@@ -122,7 +137,16 @@ describe.skipIf(!edge)('test-owned headless CDP page', () => {
           expect.objectContaining({ name: 'DONE:alpha' })
         ]))
         expect(await pageB.locator('input').inputValue()).toBe('')
+        await pageA.close()
+        const [lost, survivor] = await Promise.all([
+          rawCall('observe', { handleId: opened.handleId }),
+          call('observe', { handleId: openedB.handleId })
+        ])
+        expect(lost).toMatchObject({ ok: false, error: { code: 'TARGET_LOST' } })
+        expect(survivor).toMatchObject({ targetId: targetB!.targetId })
+        expect(await pageB.title()).toBe('Page B')
         await call('handles/close', { handleId: opened.handleId, reason: 'test_complete' })
+        await call('handles/close', { handleId: openedB.handleId, reason: 'test_complete' })
         expect((await call('capabilities')).activeHandleCount).toBe(0)
       } finally {
         await adapter.close()

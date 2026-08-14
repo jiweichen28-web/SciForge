@@ -30,26 +30,47 @@ class SessionInputChannel:
         self.cancellation = cancellation
         self.backend = backend
         self.handle = handle
+        self.requested_isolation = backend.input_isolation
         self._closed = False
         self._lock = threading.RLock()
         self.last_verification: dict[str, Any] = {}
+        self._deadline_at: float | None = None
+
+    def begin_request(
+        self,
+        request_id: str,
+        cancellation: threading.Event,
+        deadline_ms: int | None = None,
+        requested_isolation: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._require_open()
+            self.request_id = request_id
+            self.cancellation = cancellation
+            self.requested_isolation = requested_isolation or self.backend.input_isolation
+            self._deadline_at = (
+                time.monotonic() + (deadline_ms / 1000.0) if deadline_ms is not None else None
+            )
+            self.last_verification = {}
 
     @property
     def cancelled(self) -> bool:
         return self.cancellation.is_set()
 
+    @property
+    def remaining_seconds(self) -> float | None:
+        return None if self._deadline_at is None else max(0.0, self._deadline_at - time.monotonic())
+
     def observe(self) -> Image.Image:
         with self._lock:
             self._require_open()
-            if self.cancelled:
-                raise ChannelError("CANCEL_PENDING", "request was cancelled before observation")
+            self._require_active("before observation")
             return self.backend.observe(self.handle)
 
     def perform(self, action: dict[str, Any], width: int, height: int) -> None:
         with self._lock:
             self._require_open()
-            if self.cancelled:
-                raise ChannelError("CANCEL_PENDING", "request was cancelled before host input")
+            self._require_active("before host input")
             try:
                 self.backend.perform(self.handle, action, width, height)
             except ChannelError:
@@ -61,7 +82,23 @@ class SessionInputChannel:
             verification = getattr(self.backend, "verification", None)
             self.last_verification = dict(verification(self.handle)) if callable(verification) else {}
             if self.cancelled:
-                raise ChannelError("CANCEL_PENDING", "request was cancelled after host input")
+                raise ChannelError(
+                    "CANCEL_PENDING",
+                    "request was cancelled after host input",
+                    details={
+                        "mayHaveTakenEffect": True,
+                        "verification": dict(self.last_verification),
+                    },
+                )
+            if self._deadline_at is not None and time.monotonic() >= self._deadline_at:
+                raise ChannelError(
+                    "TIMEOUT",
+                    "request deadline expired after host input",
+                    details={
+                        "mayHaveTakenEffect": True,
+                        "verification": dict(self.last_verification),
+                    },
+                )
 
     def close(self, reason: str) -> list[str]:
         with self._lock:
@@ -95,12 +132,21 @@ class SessionInputChannel:
         end = time.monotonic() + max(0.0, min(float(seconds), 30.0))
         while True:
             self._require_open()
-            if self.cancelled:
-                raise ChannelError("CANCEL_PENDING", "request was cancelled while waiting")
+            self._require_active("while waiting")
             remaining = end - time.monotonic()
+            deadline_remaining = self.remaining_seconds
+            if deadline_remaining is not None:
+                remaining = min(remaining, deadline_remaining)
             if remaining <= 0:
+                self._require_active("while waiting")
                 return
             self.cancellation.wait(min(0.1, remaining))
+
+    def _require_active(self, phase: str) -> None:
+        if self.cancelled:
+            raise ChannelError("CANCEL_PENDING", f"request was cancelled {phase}")
+        if self._deadline_at is not None and time.monotonic() >= self._deadline_at:
+            raise ChannelError("TIMEOUT", f"request deadline expired {phase}")
 
     def _require_open(self) -> None:
         if self._closed:
