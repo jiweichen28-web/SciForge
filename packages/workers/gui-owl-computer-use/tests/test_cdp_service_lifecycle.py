@@ -70,7 +70,10 @@ class FakeCdpBackend(CdpAdapterBackend):
 
     def capabilities(self) -> dict[str, Any]:
         return {"backend": self.backend_id, "available": self.available,
-                "effectiveIsolation": self.input_isolation, "activeHandleCount": 0}
+                "effectiveIsolation": self.input_isolation, "activeHandleCount": 0,
+                "supportedTargetKinds": ["browser-page"],
+                "requiresHostFocus": False, "affectsUserInput": False,
+                "usesHostClipboard": False, "activatesTargetForObservation": True}
 
     def discover_targets(self) -> list[dict[str, Any]]:
         if not self.available:
@@ -303,6 +306,9 @@ def test_capability_discovery_fails_closed_when_adapter_transport_is_down():
         "backend": "browser-cdp", "available": False,
         "effectiveIsolation": "host-app-scoped",
         "reason": "CDP adapter is unavailable (ConnectionError).",
+        "supportedTargetKinds": ["browser-page"],
+        "requiresHostFocus": False, "affectsUserInput": False,
+        "usesHostClipboard": False, "activatesTargetForObservation": True,
         "leaseScope": "target",
     }
 

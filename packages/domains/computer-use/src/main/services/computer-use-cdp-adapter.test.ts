@@ -42,7 +42,12 @@ function fakeDriver(): CdpAdapterDriver & { events: string[] } {
         available: true,
         adapterInstanceId: 'test-adapter',
         generation: 'test-generation',
-        activeHandleCount: handles.size
+        activeHandleCount: handles.size,
+        supportedTargetKinds: ['browser-page'],
+        requiresHostFocus: false,
+        affectsUserInput: false,
+        usesHostClipboard: false,
+        activatesTargetForObservation: true
       }
     },
     async targets() { return [target('page-a'), target('page-b'), target('page-c')] },
@@ -270,7 +275,14 @@ describe('computer-use CDP adapter', () => {
     const { adapter } = await start()
     await expect((await call(adapter, '/v1/capabilities')).json()).resolves.toMatchObject({
       ok: true,
-      data: { available: true }
+      data: {
+        available: true,
+        supportedTargetKinds: ['browser-page'],
+        requiresHostFocus: false,
+        affectsUserInput: false,
+        usesHostClipboard: false,
+        activatesTargetForObservation: true
+      }
     })
     const targetsPayload = await (await call(adapter, '/v1/targets')).json() as {
       ok: boolean

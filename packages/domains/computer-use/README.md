@@ -12,6 +12,11 @@ observation, action, navigation readback, and verification stays on that exact
 page. There is no CDP-to-PyAutoGUI fallback. The old `{ instruction }` call
 continues through the host-approved process-global Legacy channel.
 
+CDP actions do not require operating-system focus, inject host mouse/keyboard
+input, or use the host clipboard. Screenshot observation does activate the
+bound browser tab inside the explicitly allowlisted browser; capabilities
+report this separately as `activatesTargetForObservation=true`.
+
 The planner bridge calls the Host's active Agent runtime through
 `runEphemeral`, with no hard-coded Codex or Claude selection and no tools. It
 requires the bound target's bounded canonical semantic observation and uses

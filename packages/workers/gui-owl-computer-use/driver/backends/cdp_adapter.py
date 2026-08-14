@@ -64,6 +64,7 @@ class CdpAdapterBackend:
                 "available": False,
                 "effectiveIsolation": self.input_isolation,
                 "reason": "CDP adapter is not configured",
+                **_target_behavior(),
             }
         data = self._request("GET", "/v1/capabilities")
         return {
@@ -72,6 +73,7 @@ class CdpAdapterBackend:
             "effectiveIsolation": self.input_isolation,
             "reason": data.get("reason"),
             "activeHandleCount": int(data.get("activeHandleCount") or 0),
+            **_target_behavior(),
         }
 
     def discover_targets(self) -> list[dict[str, Any]]:
@@ -365,3 +367,13 @@ def _pre_dispatch_failure(error: requests.RequestException) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def _target_behavior() -> dict[str, Any]:
+    return {
+        "supportedTargetKinds": ["browser-page"],
+        "requiresHostFocus": False,
+        "affectsUserInput": False,
+        "usesHostClipboard": False,
+        "activatesTargetForObservation": True,
+    }

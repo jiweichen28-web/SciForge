@@ -37,7 +37,18 @@ export type BrowserPageCdpAdapterTarget = Readonly<{
 export type CdpAdapterTarget = BrowserPageCdpAdapterTarget
 
 export type CdpAdapterDriver = Readonly<{
-  available(): Promise<{ available: boolean; reason?: string; adapterInstanceId: string; generation: string; activeHandleCount: number; supportedTargetKinds?: Array<CdpAdapterTarget['kind']> }>
+  available(): Promise<{
+    available: boolean
+    reason?: string
+    adapterInstanceId: string
+    generation: string
+    activeHandleCount: number
+    supportedTargetKinds?: Array<CdpAdapterTarget['kind']>
+    requiresHostFocus?: boolean
+    affectsUserInput?: boolean
+    usesHostClipboard?: boolean
+    activatesTargetForObservation?: boolean
+  }>
   targets(): Promise<CdpAdapterTarget[]>
   open(target: CdpAdapterTarget, requestId: string): Promise<{ handleId: string; targetId: string; generation: string }>
   observe(handleId: string): Promise<Record<string, unknown>>
@@ -151,14 +162,32 @@ export function createPlaywrightCdpDriver(endpoints: readonly string[]): CdpAdap
 
   return Object.freeze({
     async available() {
+      const targetBehavior = {
+        supportedTargetKinds: ['browser-page'] as Array<CdpAdapterTarget['kind']>,
+        requiresHostFocus: false,
+        affectsUserInput: false,
+        usesHostClipboard: false,
+        activatesTargetForObservation: true
+      }
       if (allowedEndpoints.length === 0) {
-        return { available: false, reason: 'No allowlisted loopback CDP endpoint is configured.', adapterInstanceId, generation, activeHandleCount: handles.size, supportedTargetKinds: ['browser-page'] }
+        return {
+          available: false,
+          reason: 'No allowlisted loopback CDP endpoint is configured.',
+          adapterInstanceId, generation, activeHandleCount: handles.size,
+          ...targetBehavior
+        }
       }
       try {
         await Promise.all(allowedEndpoints.map(browserFor))
-        return { available: true, adapterInstanceId, generation, activeHandleCount: handles.size, supportedTargetKinds: ['browser-page'] }
+        return {
+          available: true, adapterInstanceId, generation,
+          activeHandleCount: handles.size, ...targetBehavior
+        }
       } catch (error) {
-        return { available: false, reason: safeError(error), adapterInstanceId, generation, activeHandleCount: handles.size, supportedTargetKinds: ['browser-page'] }
+        return {
+          available: false, reason: safeError(error), adapterInstanceId, generation,
+          activeHandleCount: handles.size, ...targetBehavior
+        }
       }
     },
     async targets() {

@@ -96,6 +96,11 @@ class ComputerUseService:
                 "available": False,
                 "effectiveIsolation": "host-app-scoped",
                 "reason": f"CDP adapter is unavailable ({type(error).__name__}).",
+                "supportedTargetKinds": ["browser-page"],
+                "requiresHostFocus": False,
+                "affectsUserInput": False,
+                "usesHostClipboard": False,
+                "activatesTargetForObservation": True,
             }
         return {
             "backends": [
