@@ -634,6 +634,49 @@ describe('runtime MCP tool gateway', () => {
     )
   })
 
+  it('projects trusted invocation metadata only through matching generic contributions', async () => {
+    const callTool = vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }] }))
+    const bridge = createRuntimeMcpToolGateway({
+      servers: [{ id: 'domain-worker', command: '/bin/domain-worker' }],
+      trustedInvocationMetadata: [{
+        serverId: 'domain-worker',
+        tools: ['mutate'],
+        metadataKey: 'io.example/trusted',
+        source: 'trusted-invocation'
+      }],
+      clientFactory: async () => fakeMcpClient({
+        tools: [{ name: 'mutate', description: 'Mutate.' }],
+        callTool
+      })
+    })
+    await bridge.tools()
+    await bridge.callTool({
+      requestId: 'request-1',
+      runtimeId: 'codex',
+      threadId: 'thread-1',
+      tool: 'mutate',
+      arguments: { value: 1 },
+      trustedInvocation: {
+        requestId: 'request-1',
+        runtimeId: 'codex',
+        threadId: 'thread-1',
+        actionId: 'mcp.domain-worker.mutate',
+        invocationId: 'invocation-1',
+        approval: 'confirmation'
+      }
+    })
+    expect(callTool).toHaveBeenCalledWith({
+      name: 'mutate',
+      arguments: { value: 1 },
+      _meta: {
+        'io.example/trusted': expect.objectContaining({
+          invocationId: 'invocation-1',
+          approval: 'confirmation'
+        })
+      }
+    }, expect.anything())
+  })
+
   it('aborts in-flight MCP calls for an interrupted turn and records the reason', async () => {
     let resolveStarted!: () => void
     const started = new Promise<void>((resolve) => {

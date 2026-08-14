@@ -21,16 +21,15 @@ import base64
 import hmac
 import io
 import json
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 from PIL import Image
 
 from . import result as R
-from . import cancel
 from .config import CONFIG
 from .runner import run_task
+from .service import SERVICE
 
 VERSION = "0.1.0"
 
@@ -74,10 +73,7 @@ def _screenshot_provider(body: dict):
     if body.get("imagePath"):
         img = Image.open(body["imagePath"]).convert("RGB")
         return lambda: img
-    # live local desktop
-    from driver.desktop import DesktopExecutor
-    ex = DesktopExecutor(dry_run=not (body.get("execute") and body.get("approve")))
-    return ex.screenshot
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -102,6 +98,11 @@ class Handler(BaseHTTPRequestHandler):
                 "endpoint": "responses",
                 "allowExecute": CONFIG.allow_execute,
                 "authRequired": bool(CONFIG.service_token or CONFIG.allow_execute)}})
+        if self.path == "/computer-use/status":
+            auth_error = _check_auth(self.headers.get("Authorization"))
+            if auth_error:
+                return self._send(401, auth_error)
+            return self._send(200, {"ok": True, "data": SERVICE.status()})
         return self._send(404, R.err("NOT_FOUND", f"no route {self.path}"))
 
     def do_POST(self):
@@ -121,14 +122,26 @@ class Handler(BaseHTTPRequestHandler):
             rid = body.get("requestId")
             if not rid:
                 return self._send(400, R.err("INVALID_ARGUMENT", "requestId is required"))
-            cancel.request_cancel(rid)
-            return self._send(200, {"ok": True, "data": {"cancelled": rid}})
+            res = SERVICE.cancel(body)
+            return self._send(200 if res.get("ok") else 400, res)
         try:
-            provider = _screenshot_provider(body)
-            res = run_task(
-                CONFIG, body.get("instruction", ""), provider,
-                execute=bool(body.get("execute")), approve=bool(body.get("approve")),
-                request_id=body.get("requestId"))
+            def execute_channel(request, channel):
+                return run_task(
+                    CONFIG, request["instruction"], channel,
+                    execute=request["execute"], approve=request["approve"],
+                )
+
+            res = SERVICE.run(
+                body,
+                execute_channel,
+                allow_execute=CONFIG.allow_execute,
+                settle_s=CONFIG.settle_s,
+                screenshot_provider=(
+                    _screenshot_provider(body)
+                    if body.get("imagePath") or body.get("imageBase64")
+                    else None
+                ),
+            )
             code = 200 if res.get("ok") else (
                 403 if res.get("error", {}).get("code") == "NEEDS_APPROVAL" else 400)
             return self._send(code, res)
@@ -142,7 +155,10 @@ def main():
           f"(model-router={CONFIG.model_router_model} @ {CONFIG.model_router_base_url}, "
           f"allow_execute={CONFIG.allow_execute}, "
           f"auth_required={bool(CONFIG.service_token or CONFIG.allow_execute)})")
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":

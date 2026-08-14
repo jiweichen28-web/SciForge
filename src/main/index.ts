@@ -133,11 +133,6 @@ import type { ScientificPlottingMcpLaunchConfig } from './scientific-plotting-mc
 import type { BgcDiscoveryMcpLaunchConfig } from './bgc-discovery-mcp-config'
 import { type ImageGenerationMcpLaunchConfig } from './image-generation-mcp-config'
 import type { PptMasterMcpLaunchConfig } from './ppt-master-mcp-config'
-import {
-  GUI_COMPUTER_USE_MCP_SERVER_NAME,
-  isComputerUseMcpConfigured,
-  type ComputerUseMcpLaunchConfig
-} from './computer-use-mcp-config'
 import { buildManagedGuiMcpServers } from './gui-mcp-registry'
 import { migrateLegacyKunGlobalConfig } from './legacy-kun-global-config-migration'
 import { registerAppIpcHandlers } from './ipc/register-app-ipc-handlers'
@@ -158,6 +153,8 @@ import {
   createMainActionGuardEvaluator,
   createMainSystemCapabilityInvokerFactory,
   listMainArtifactConsumers,
+  listMainMcpTrustedInvocationMetadataContributions,
+  listMainRuntimeMcpServerContributions,
   listMainVisualSourceContributions,
   listMainWorkspacePreviewPluginContributions,
   type ActivatedMainRuntimeContributions
@@ -335,16 +332,8 @@ function getPptMasterMcpLaunchConfig(): PptMasterMcpLaunchConfig {
   }
 }
 
-function getComputerUseMcpLaunchConfig(): ComputerUseMcpLaunchConfig {
-  return {
-    appPath: app.getAppPath(),
-    execPath: process.execPath,
-    isPackaged: app.isPackaged
-  }
-}
-
 function managedGuiMcpServers(settings: AppSettingsV1) {
-  return buildManagedGuiMcpServers({
+  const builtIn = buildManagedGuiMcpServers({
     settings,
     scheduleMcp: { settings, launch: getScheduleMcpLaunchConfig() },
     researchMcp: { launch: getResearchSearchMcpLaunchConfig() },
@@ -367,15 +356,26 @@ function managedGuiMcpServers(settings: AppSettingsV1) {
       settings,
       launch: getImageGenerationMcpLaunchConfig()
     },
-    pptMasterMcp: { settings, launch: getPptMasterMcpLaunchConfig() },
-    computerUseMcp: { settings, launch: getComputerUseMcpLaunchConfig() }
+    pptMasterMcp: { settings, launch: getPptMasterMcpLaunchConfig() }
   })
+  const domainOwned = domainRuntimeMcpServerContributions.flatMap((contribution) => {
+    const config = contribution.createConfig(settings)
+    return config ? [{
+      ...config,
+      args: config.args ? [...config.args] : undefined,
+      env: config.env ? { ...config.env } : undefined,
+      enabledTools: config.enabledTools ? [...config.enabledTools] : undefined
+    }] : []
+  })
+  return [...builtIn, ...domainOwned]
 }
 
 async function runtimeMayUseManagedTool(runtimeId: string, tool: RuntimeToolDefinition): Promise<boolean> {
-  if (tool.providerId !== GUI_COMPUTER_USE_MCP_SERVER_NAME) return true
-  if (runtimeId !== 'codex' && runtimeId !== 'claude') return false
-  return isComputerUseMcpConfigured(await store.load(), runtimeId)
+  const contribution = domainRuntimeMcpServerContributions.find(
+    ({ serverId }) => serverId === tool.providerId
+  )
+  if (!contribution) return true
+  return contribution.isRuntimeEnabled?.(await store.load(), runtimeId) ?? true
 }
 
 traceStartup('main module evaluated')
@@ -407,6 +407,12 @@ let agentRuntimeHostForShutdown: AgentRuntimeHost | null = null
 let domainExecutionEventsForShutdown: DomainExecutionEventService | null = null
 let turnArtifactHandoffForShutdown: TurnArtifactHandoffService | null = null
 let runtimeMcpToolGateway: RuntimeMcpToolGateway | null = null
+let domainRuntimeMcpServerContributions: ReturnType<
+  typeof listMainRuntimeMcpServerContributions
+> = Object.freeze([])
+let domainMcpTrustedInvocationMetadata: ReturnType<
+  typeof listMainMcpTrustedInvocationMetadataContributions
+> = Object.freeze([])
 let claudeCodeRuntime: ClaudeCodeRuntimeService | null = null
 let codeNavigationService: LspCodeNavigationService | null = null
 let domainModuleCatalog: DomainModuleCatalog | null = null
@@ -1122,6 +1128,9 @@ app
           sensitiveValues: traceSensitiveSettings.values()
         })[0] ?? ''
       },
+      getAppRoot: () => app.getAppPath(),
+      getExecutablePath: () => process.execPath,
+      isPackaged: () => app.isPackaged,
       openPath: async (targetPath) => {
         const error = await shell.openPath(targetPath)
         if (error) throw new Error(error)
@@ -1304,8 +1313,12 @@ app
       ...listMainVisualSourceContributions(catalog)
     ])
     domainModuleCatalog = catalog
+    domainRuntimeMcpServerContributions = listMainRuntimeMcpServerContributions(catalog)
+    domainMcpTrustedInvocationMetadata =
+      listMainMcpTrustedInvocationMetadataContributions(catalog)
     runtimeMcpToolGateway = createRuntimeMcpToolGateway({
-      servers: managedGuiMcpServers(initial)
+      servers: managedGuiMcpServers(initial),
+      trustedInvocationMetadata: domainMcpTrustedInvocationMetadata
     })
     const runtimeCapabilityBroker = createRuntimeCapabilityBroker({
       broker: capabilityBroker,

@@ -27,11 +27,11 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from . import cancel
 from . import contract
 from . import result as R
 from .config import CONFIG
 from .runner import run_task
+from .service import SERVICE
 
 SERVER_NAME = "sciforge-gui-owl-computer-use"
 VERSION = "0.1.0"
@@ -48,27 +48,33 @@ def _screenshot_provider(args: Dict[str, Any]):
     if args.get("imagePath"):
         img = Image.open(args["imagePath"]).convert("RGB")
         return lambda: img
-    from driver.desktop import DesktopExecutor
-
-    ex = DesktopExecutor(dry_run=not (args.get("execute") and args.get("approve")))
-    return ex.screenshot
+    return None
 
 
 def _run_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-    instruction = str(args.get("instruction", "") or "").strip()
-    if not instruction:
-        return R.err("INVALID_ARGUMENT", "instruction is required")
+    # The worker-native MCP surface is not a trusted Host metadata channel.
+    # Only the domain-owned HTTP caller can provide invocation identity.
+    args = {key: value for key, value in args.items() if key != "invocation"}
     try:
-        provider = _screenshot_provider(args)
+        provider = (
+            _screenshot_provider(args)
+            if args.get("imagePath") or args.get("imageBase64")
+            else None
+        )
     except Exception as e:  # noqa: BLE001
         return R.err("UNAVAILABLE", f"screenshot source failed: {e}", retryable=True)
-    return run_task(
-        CONFIG,
-        instruction,
-        provider,
-        execute=bool(args.get("execute")),
-        approve=bool(args.get("approve")),
-        request_id=args.get("requestId"),
+    def execute_channel(request, channel):
+        return run_task(
+            CONFIG, request["instruction"], channel,
+            execute=request["execute"], approve=request["approve"],
+        )
+
+    return SERVICE.run(
+        args,
+        execute_channel,
+        allow_execute=CONFIG.allow_execute,
+        settle_s=CONFIG.settle_s,
+        screenshot_provider=provider,
     )
 
 
@@ -108,8 +114,7 @@ def create_server() -> Server:
             if not rid:
                 res = R.err("INVALID_ARGUMENT", "requestId is required")
             else:
-                cancel.request_cancel(rid)
-                res = R.ok({"cancelled": rid}, summary=f"cancel requested for {rid}")
+                res = SERVICE.cancel({"requestId": rid})
         elif name == contract.TOOL_RUN:
             # The desktop loop can run for many steps; keep the event loop free.
             res = await asyncio.to_thread(_run_tool, arguments)

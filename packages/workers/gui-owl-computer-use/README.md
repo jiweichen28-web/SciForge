@@ -15,7 +15,7 @@ Router responses endpoint.
                 ┌──────────────────────────────────────────────┐
 task ──▶        │  observe → routed model plans+grounds+decides → act → …    │
                 │   model  → local SciForge Model Router                      │
-                │   act    → DesktopExecutor (local, the only OS layer) │
+                │   act    → session/channel/router → Legacy backend   │
                 └──────────────────────────────────────────────┘
 ```
 
@@ -29,7 +29,7 @@ start unless the operator explicitly opts in and supplies a licensed checkpoint.
 
 This worker is now the single computer-use path. The old
 `@sciforge/computer-use` GUI-managed primitive MCP server has been retired, and
-startup cleanup removes stale `gui_computer_use` entries from user MCP config.
+the Host no longer registers either retired server name.
 
 All runtimes expose the same `computer_use` tool through the GUI-managed
 `gui_owl_computer_use` MCP wrapper. That wrapper calls this HTTP sidecar.
@@ -43,8 +43,10 @@ model/provider selection and policy.
   task is truly done.
 - **External side effects require approval**: dry-run by default. Real
   mouse/keyboard happens only when the call sets `execute=true` **and**
-  `approve=true` **and** the worker was started with `CUA_ALLOW_EXECUTE=true`;
-  otherwise it returns `NEEDS_APPROVAL`.
+  `approve=true`, the worker was started with `CUA_ALLOW_EXECUTE=true`, **and**
+  the domain MCP supplied the matching Host-trusted confirmed invocation;
+  otherwise it returns `NEEDS_APPROVAL`. Direct HTTP and worker-native MCP
+  callers cannot mint this approval identity.
 - **HTTP sidecar auth**: `POST /computer-use/run` and
   `POST /computer-use/cancel` accept an optional bearer token via
   `CUA_SERVICE_TOKEN`. The GUI launcher generates a random token per start and
@@ -66,13 +68,15 @@ model/provider selection and policy.
 | Grounding model driver (prompt, call, parse, coord mapping) | `cua/owl_agent.py` |
 | Mobile-Agent-v3 reflector | `cua/reflector.py` |
 | Env-driven config | `cua/config.py` |
-| Cancellation registry | `cua/cancel.py` |
+| Session/request/process-global lease authority | `cua/session_registry.py` |
+| Service lifecycle authority | `cua/service.py` |
 | **MCP** stdio transport adapter | `cua/mcp_server.py` |
 | **HTTP** ServiceResult sidecar | `cua/server.py` |
 | Local entry (`--stdio` / `--http`) | `cua/cli.py` |
-| Cross-platform desktop executor | `driver/desktop.py` |
-| Click-through mouse overlay | `driver/overlay.py` |
+| Target-bound input channel and fail-closed router | `driver/channel.py`, `driver/router.py` |
+| Host-approved compatibility backend | `driver/backends/legacy_pyautogui.py` |
 | Pure contract/result/parse tests | `tests/test_contract.py` |
+| Service/registry/router/channel lifecycle tests | `tests/test_service_lifecycle.py` |
 | Development-only local model serve helper | `server/serve-gui-owl-32b.sh` |
 | One-click launcher: Model Router config + service + SciForge GUI | `一键启动-computer-use.bat`, `启动-sciforge-computer-use.ps1` |
 | Launcher secrets template (copy to `启动-secrets.local.ps1`) | `启动-secrets.example.ps1` |
@@ -108,10 +112,8 @@ curl -s localhost:3900/computer-use/run \
   -H "Authorization: Bearer $CUA_SERVICE_TOKEN" \
   -d '{"instruction":"click the Save button","imagePath":"some_ui.png"}'
 
-# live execution (opt-in): start with CUA_ALLOW_EXECUTE=true, then
-curl -s localhost:3900/computer-use/run \
-  -H "Authorization: Bearer $CUA_SERVICE_TOKEN" \
-  -d '{"instruction":"open Notepad and type hello","execute":true,"approve":true}'
+# live execution is intentionally available only through SciForge's
+# domain-owned computer_use MCP tool and its Host confirmation prompt.
 ```
 
 Standalone service smoke test (no GUI): start `--http`, then
@@ -130,12 +132,12 @@ minimal wiring needed to expose it to the agent runtime:
 
 | File | Why |
 |---|---|
-| `src/main/computer-use-mcp-server.ts` | GUI-managed MCP wrapper that exposes `computer_use` and calls this sidecar |
-| `src/main/gui-mcp-registry.ts` | registers `gui_owl_computer_use` for Codex and Claude Code |
+| `packages/domains/computer-use` | Domain-owned v1 MCP contract, launch contribution, and trusted invocation metadata rule |
+| `src/main/modules/runtime-mcp-contributions.ts` | Generic Host composition for domain-provided MCP servers |
 
 ## Config
 
 See [`.env.example`](.env.example). Key vars: `SCIFORGE_MODEL_ROUTER_BASE_URL`,
 `SCIFORGE_MODEL_ROUTER_MODEL`, `SCIFORGE_MODEL_ROUTER_RUNTIME_API_KEY`,
 `CUA_MAX_STEPS`, `CUA_REFLECT`, `CUA_ALLOW_EXECUTE`,
-`CUA_PORT`, `CUA_SERVICE_TOKEN`, `CUA_SHOW_OVERLAY`, `CUA_ARTIFACT_DIR`.
+`CUA_PORT`, `CUA_SERVICE_TOKEN`, `CUA_ARTIFACT_DIR`.

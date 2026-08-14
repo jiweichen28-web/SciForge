@@ -15,15 +15,8 @@ import type {
   ClaudeCodeRuntimeService
 } from './claude-code-service'
 import {
-  COMPUTER_USE_MCP_TOOL_NAME,
-  configuredComputerUseCapability,
-  GUI_COMPUTER_USE_MCP_SERVER_NAME,
-  unavailableComputerUseCapability
-} from '../../computer-use-mcp-config'
-import {
   normalizeAgentCapabilitySettings,
-  type AgentSubagentSettingsV1,
-  type AppSettingsV1
+  type AgentSubagentSettingsV1
 } from '../../../shared/app-settings'
 
 export function createClaudeCodeAgentRuntimeAdapter(
@@ -81,9 +74,9 @@ export function createClaudeCodeAgentRuntimeAdapter(
     },
 
     async capabilities(context) {
-      const computerUseConfigured = isClaudeComputerUseConfigured(service, context.settings)
+      const mcpConfigured = isClaudeMcpConfigured(service)
       return claudeCapabilities(
-        computerUseConfigured,
+        mcpConfigured,
         normalizeAgentCapabilitySettings(context.settings.agentCapabilities).subagents
       )
     },
@@ -191,25 +184,17 @@ export function createClaudeCodeAgentRuntimeAdapter(
     async auxiliary(_context, input) {
       switch (input.operation) {
         case 'getRuntimeInfo': {
-          const computerUseConfigured = isClaudeComputerUseConfigured(service, _context.settings)
+          const mcpConfigured = isClaudeMcpConfigured(service)
           return claudeRuntimeInfo(
             await service.runtimeInfo(),
-            computerUseConfigured,
+            mcpConfigured,
             normalizeAgentCapabilitySettings(_context.settings.agentCapabilities).subagents
           )
         }
         case 'getToolDiagnostics': {
-          const computerUseConfigured = isClaudeComputerUseConfigured(service, _context.settings)
           return {
             providers: [],
-            mcpServers: computerUseConfigured
-              ? [{
-                  id: GUI_COMPUTER_USE_MCP_SERVER_NAME,
-                  status: 'configured',
-                  toolCount: 1,
-                  tools: [COMPUTER_USE_MCP_TOOL_NAME]
-                }]
-              : [],
+            mcpServers: [],
             webProviders: [],
             attachments: { count: 0 },
             skills: {
@@ -272,20 +257,16 @@ function boundedClaudeEvent(event: import('../../../shared/agent-runtime-contrac
   return boundAgentRuntimeEventForDelivery(event, { runtimeId: 'claude' })
 }
 
-function isClaudeComputerUseConfigured(
-  service: ClaudeCodeRuntimeService,
-  settings: AppSettingsV1
-): boolean {
-  return typeof service.isComputerUseMcpConfigured === 'function' &&
-    service.isComputerUseMcpConfigured(settings)
+function isClaudeMcpConfigured(service: ClaudeCodeRuntimeService): boolean {
+  return typeof service.isMcpConfigured === 'function' && service.isMcpConfigured()
 }
 
 function claudeRuntimeInfo(
   info: Record<string, unknown>,
-  computerUseConfigured = false,
+  mcpConfigured = false,
   subagents: AgentSubagentSettingsV1 = normalizeAgentCapabilitySettings(undefined).subagents
 ): Record<string, unknown> {
-  const caps = claudeCapabilities(computerUseConfigured, subagents)
+  const caps = claudeCapabilities(mcpConfigured, subagents)
   return {
     host: 'claude-code',
     port: 0,
@@ -310,13 +291,9 @@ function claudeRuntimeInfo(
       },
       mcp: {
         ...coreCapability(caps.tools.mcp),
-        configuredServers: computerUseConfigured ? 1 : 0,
+        configuredServers: mcpConfigured ? 1 : 0,
         connectedServers: 0,
         toolCount: caps.tools.mcp.toolCount ?? 0,
-        computerUse: {
-          enabled: computerUseConfigured,
-          available: computerUseConfigured
-        },
         search: {
           enabled: false,
           mode: 'direct',
@@ -355,11 +332,10 @@ function claudeRuntimeInfo(
 }
 
 function claudeCapabilities(
-  computerUseConfigured = false,
+  mcpConfigured = false,
   subagents: AgentSubagentSettingsV1 = normalizeAgentCapabilitySettings(undefined).subagents
 ): AgentRuntimeCapabilities {
   const unavailable = { available: false, reason: 'unsupported' }
-  const computerUseReason = 'Claude Code computer-use MCP server is not configured yet.'
   const caps = createDefaultAgentRuntimeCapabilities({
     runtimeId: 'claude',
     transport: 'cli_process'
@@ -410,7 +386,7 @@ function claudeCapabilities(
       toolCalling: true,
       commandExecution: { available: true },
       fileChange: { available: true },
-      mcp: computerUseConfigured
+      mcp: mcpConfigured
         ? {
             available: true,
             degraded: true,
@@ -420,9 +396,10 @@ function claudeCapabilities(
         : { available: false, reason: 'Claude Code MCP diagnostics are not exposed through this service yet.' },
       web: { available: false, reason: 'Claude Code web capabilities are not exposed through this service yet.' },
       research: { available: false, reason: 'Claude Code research search is not exposed through this service yet.' },
-      computerUse: computerUseConfigured
-        ? configuredComputerUseCapability()
-        : unavailableComputerUseCapability(computerUseReason),
+      computerUse: {
+        available: false,
+        reason: 'Domain-owned tools are exposed through the generic MCP capability.'
+      },
       skills: { available: false, reason: 'Claude Code skills are not exposed through this service yet.' },
       subagents: subagents.enabled
         ? {

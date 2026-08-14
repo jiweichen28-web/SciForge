@@ -48,12 +48,6 @@ import {
   type AgentSubagentSettingsV1,
   type AppSettingsV1
 } from '../../../shared/app-settings'
-import {
-  COMPUTER_USE_MCP_TOOL_NAME,
-  configuredComputerUseCapability,
-  GUI_COMPUTER_USE_MCP_SERVER_NAME,
-  unavailableComputerUseCapability
-} from '../../computer-use-mcp-config'
 
 export function createCodexAgentRuntimeAdapter(service: CodexRuntimeService): AgentRuntimeAdapter {
   return {
@@ -337,7 +331,6 @@ export function createCodexAgentRuntimeAdapter(service: CodexRuntimeService): Ag
 type CodexMcpState = {
   mcpConfigured: boolean
   researchConfigured: boolean
-  computerUseConfigured: boolean
   subagents: AgentSubagentSettingsV1
   toolUnavailableDiagnostics: CodexMcpToolUnavailableDiagnostic[]
 }
@@ -355,7 +348,6 @@ type CodexMcpToolUnavailableDiagnostic = {
 const emptyCodexMcpState: CodexMcpState = {
   mcpConfigured: false,
   researchConfigured: false,
-  computerUseConfigured: false,
   subagents: normalizeAgentCapabilitySettings(undefined).subagents,
   toolUnavailableDiagnostics: []
 }
@@ -363,16 +355,13 @@ const emptyCodexMcpState: CodexMcpState = {
 function serviceMcpState(service: CodexRuntimeService, settings?: AppSettingsV1): CodexMcpState {
   const researchConfigured =
     typeof service.isResearchMcpConfigured === 'function' && service.isResearchMcpConfigured()
-  const computerUseConfigured =
-    typeof service.isComputerUseMcpConfigured === 'function' && service.isComputerUseMcpConfigured(settings)
   const mcpConfigured =
     typeof service.isMcpConfigured === 'function'
-      ? (researchConfigured || computerUseConfigured || service.isMcpConfigured())
-      : (researchConfigured || computerUseConfigured)
+      ? (researchConfigured || service.isMcpConfigured())
+      : researchConfigured
   return {
     mcpConfigured,
     researchConfigured,
-    computerUseConfigured,
     subagents: normalizeAgentCapabilitySettings(settings?.agentCapabilities).subagents,
     toolUnavailableDiagnostics: codexMcpToolUnavailableDiagnostics(service)
   }
@@ -381,7 +370,7 @@ function serviceMcpState(service: CodexRuntimeService, settings?: AppSettingsV1)
 function codexCapabilities(state: CodexMcpState = emptyCodexMcpState): AgentRuntimeCapabilities {
   const unavailable = { available: false, reason: 'unsupported' }
   const mcpDiagnosticsReason = 'Codex MCP diagnostics are not exposed through this service yet.'
-  const configuredMcpToolCount = Number(state.researchConfigured) + Number(state.computerUseConfigured)
+  const configuredMcpToolCount = Number(state.researchConfigured)
   const caps = createDefaultAgentRuntimeCapabilities({
     runtimeId: 'codex',
     transport: 'jsonrpc_stdio'
@@ -450,9 +439,10 @@ function codexCapabilities(state: CodexMcpState = emptyCodexMcpState): AgentRunt
             maxResults: 10
           }
         : { available: false, reason: 'Shared research MCP server is not configured for Codex yet.' },
-      computerUse: state.computerUseConfigured
-        ? configuredComputerUseCapability()
-        : unavailableComputerUseCapability('GUI-Owl computer-use MCP server is not configured for Codex.'),
+      computerUse: {
+        available: false,
+        reason: 'Domain-owned tools are exposed through the generic MCP capability.'
+      },
       skills: { available: false, reason: 'Codex skills are not exposed through this service yet.' },
       subagents: state.subagents.enabled
         ? {
@@ -493,7 +483,7 @@ function codexCapabilities(state: CodexMcpState = emptyCodexMcpState): AgentRunt
 
 function codexRuntimeInfo(state: CodexMcpState = emptyCodexMcpState): Record<string, unknown> {
   const caps = codexCapabilities(state)
-  const configuredMcpToolCount = Number(state.researchConfigured) + Number(state.computerUseConfigured)
+  const configuredMcpToolCount = Number(state.researchConfigured)
   return {
     host: 'codex',
     port: 0,
@@ -522,10 +512,6 @@ function codexRuntimeInfo(state: CodexMcpState = emptyCodexMcpState): Record<str
         connectedServers: 0,
         toolCount: caps.tools.mcp.toolCount ?? 0,
         unavailableToolCount: state.toolUnavailableDiagnostics.length,
-        computerUse: {
-          enabled: state.computerUseConfigured,
-          available: state.computerUseConfigured
-        },
         search: {
           enabled: false,
           mode: 'direct',
@@ -578,14 +564,6 @@ function codexToolDiagnostics(state: CodexMcpState = emptyCodexMcpState): Record
       status: 'configured',
       toolCount: 1,
       tools: ['research_search']
-    })
-  }
-  if (state.computerUseConfigured) {
-    mcpServers.push({
-      id: GUI_COMPUTER_USE_MCP_SERVER_NAME,
-      status: 'configured',
-      toolCount: 1,
-      tools: [COMPUTER_USE_MCP_TOOL_NAME]
     })
   }
   return {

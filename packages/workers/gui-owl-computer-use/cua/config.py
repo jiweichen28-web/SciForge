@@ -96,9 +96,6 @@ class Config:
         "CUA_SERVICE_TOKEN",
         _env("SCIFORGE_CUA_SERVICE_TOKEN"),
     ))
-    # paint a click-through mouse overlay on the real desktop during live execution
-    # (Windows; degrades to no-op elsewhere). Off => no visualization.
-    show_overlay: bool = field(default_factory=lambda: _bool_env("CUA_SHOW_OVERLAY", True))
     port: int = field(default_factory=lambda: _int_env("CUA_PORT", 3900))
     artifact_dir: str = field(default_factory=lambda: _env("CUA_ARTIFACT_DIR", os.path.join(os.getcwd(), "cua-runs")))
 

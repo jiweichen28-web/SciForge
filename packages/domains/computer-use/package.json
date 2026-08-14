@@ -1,0 +1,34 @@
+{
+  "name": "@sciforge/domain-computer-use",
+  "version": "1.0.0",
+  "license": "MIT",
+  "type": "module",
+  "private": false,
+  "description": "Domain-owned Computer Use v1 compatibility and host-approved Legacy runtime binding.",
+  "exports": {
+    "./contract": "./src/contract.ts",
+    "./definition": "./src/definition.ts",
+    "./main": "./src/main.ts",
+    "./renderer": "./src/renderer/index.tsx",
+    "./main/mcp-config": "./src/main/mcp-config.ts",
+    "./main/mcp-server": "./src/main/mcp-server.ts"
+  },
+  "files": ["src", "sciforge.domain.json", "package.json", "README.md"],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@sciforge/domain-sdk": "^0.2.0",
+    "react": "^19.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.10",
+    "electron": "^42.7.0",
+    "typescript": "^5.8.2",
+    "vitest": "^4.1.7"
+  }
+}

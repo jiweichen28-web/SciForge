@@ -5,6 +5,7 @@ import {
   RENDERER_CHAT_RESULT_PANEL_CONTRIBUTION_KIND,
   RENDERER_RESOURCE_NAVIGATION_CONTRIBUTION_KIND,
   RENDERER_EXTENSION_CONTRIBUTION_KIND,
+  RENDERER_SETTINGS_SECTION_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_BOTTOM_PANEL_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_GLOBAL_OVERLAY_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_RIGHT_PANEL_CONTRIBUTION_KIND,
@@ -18,11 +19,13 @@ import {
   isDomainRendererCommandHandler,
   isDomainRendererChatResultPanelValue,
   isDomainRendererResourceNavigationValue,
+  isDomainRendererSettingsSectionValue,
   isDomainRendererComposerContextProvider,
   isDomainRendererWorkbenchSurfaceValue,
   isDomainRendererWorkbenchToolbarActionValue,
   type DomainRendererCommandHandler,
   type DomainRendererComposerContextProvider,
+  type DomainRendererSettingsSectionValue,
   type DomainRendererComposerContextProviderContract,
   type DomainRendererResourceNavigationContract,
   type DomainRendererResourceNavigationValue,
@@ -110,6 +113,12 @@ export type InstalledRendererContributions = Readonly<{
   rightPanels: WorkbenchRightPanelContributionRegistry
   chatResultPanels: ChatResultPanelContributionRegistry
   resourceNavigations: ResourceNavigationContributionRegistry
+  settingsSections: readonly Readonly<{
+    id: string
+    ownerId: string
+    order: number
+    value: DomainRendererSettingsSectionValue<ReactElement>
+  }>[]
   bottomPanels: WorkbenchBottomPanelContributionRegistry
   globalOverlays: WorkbenchGlobalOverlayContributionRegistry
   composerContexts: ComposerContextProviderRegistry
@@ -193,6 +202,13 @@ export function createInstalledRendererContributions(
     order: number
     contract: DomainRendererResourceNavigationContract
     value: DomainRendererResourceNavigationValue
+    onDispose?: () => void
+  }> = []
+  const settingsSections: Array<{
+    id: string
+    ownerId: string
+    order: number
+    value: DomainRendererSettingsSectionValue<ReactElement>
     onDispose?: () => void
   }> = []
   const workspacePreviewPlugins: RendererWorkspacePreviewPluginRegistrationInput[] = []
@@ -369,6 +385,19 @@ export function createInstalledRendererContributions(
       ))
       continue
     }
+    if (installed.declaration.kind === RENDERER_SETTINGS_SECTION_CONTRIBUTION_KIND) {
+      if (!isDomainRendererSettingsSectionValue(installed.value)) {
+        throw invalidContribution(installed.declaration.id, installed.owner.moduleId)
+      }
+      settingsSections.push({
+        id: installed.declaration.id,
+        ownerId: installed.owner.moduleId,
+        order: installed.value.order ?? installed.declaration.priority,
+        value: installed.value as DomainRendererSettingsSectionValue<ReactElement>,
+        ...(installed.onDispose ? { onDispose: installed.onDispose } : {})
+      })
+      continue
+    }
     if (installed.declaration.kind === RENDERER_LIFECYCLE_CONTRIBUTION_KIND) {
       if (!isRendererLifecycleContribution(installed.value)) {
         throw invalidContribution(installed.declaration.id, installed.owner.moduleId)
@@ -492,6 +521,9 @@ export function createInstalledRendererContributions(
       if (lifecycle.onDispose) registrationDisposers.push(lifecycle.onDispose)
       if (dispose) registrationDisposers.push(dispose)
     }
+    for (const section of settingsSections) {
+      if (section.onDispose) registrationDisposers.push(section.onDispose)
+    }
     for (const extension of extensions) {
       if (extension.onDispose) registrationDisposers.push(extension.onDispose)
     }
@@ -517,6 +549,9 @@ export function createInstalledRendererContributions(
     rightPanels,
     chatResultPanels: chatResultPanelRegistry,
     resourceNavigations: resourceNavigationRegistry,
+    settingsSections: Object.freeze(settingsSections
+      .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+      .map(({ onDispose: _onDispose, ...section }) => Object.freeze(section))),
     bottomPanels: workbenchBottomPanels,
     globalOverlays: workbenchGlobalOverlays,
     composerContexts: workbenchComposerContexts,
