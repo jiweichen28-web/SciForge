@@ -286,6 +286,46 @@ def test_distinct_target_sessions_execute_concurrently_without_cross_target_reco
     assert runtime.status()["activeLeases"] == 0
 
 
+def test_same_target_session_allows_only_one_active_request():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_id = bind(runtime, TARGETS[0]["targetId"])["data"]["computerUseSessionId"]
+    entered = threading.Event()
+    release = threading.Event()
+    first_result = []
+    second_executed = []
+
+    def first_execute(_request, _channel):
+        entered.set()
+        assert release.wait(2)
+        return {"ok": True}
+
+    worker = threading.Thread(target=lambda: first_result.append(runtime.run({
+        "instruction": "alpha", "computerUseSessionId": session_id,
+        "execute": True, "approve": True, "requestId": "same-session-first",
+        "invocation": trusted("same-session-first"),
+    }, first_execute, allow_execute=True, settle_s=0)))
+    worker.start()
+    assert entered.wait(1)
+
+    second = runtime.run({
+        "instruction": "beta", "computerUseSessionId": session_id,
+        "execute": True, "approve": True, "requestId": "same-session-second",
+        "invocation": trusted("same-session-second"),
+    }, lambda _request, _channel: second_executed.append(True) or {"ok": True},
+        allow_execute=True, settle_s=0)
+    release.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert first_result[0]["ok"] is True
+    assert second["error"]["code"] == "HOST_INPUT_BUSY"
+    assert second_executed == []
+    assert runtime.status()["requests"] == 0
+    release_sessions(runtime, [session_id], "release-same-session")
+    assert runtime.status()["activeLeases"] == 0
+
+
 def test_bounded_parallel_run_uses_two_real_sessions_and_returns_resource_baseline():
     backend = FakeCdpBackend()
     runtime = service(backend)
