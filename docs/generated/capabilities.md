@@ -16810,6 +16810,11 @@ Reads domain-owned permissions and Computer Use lifecycle status.
             "minimum": 0,
             "type": "integer"
           },
+          "activeRequests": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
           "available": {
             "type": "boolean"
           },
@@ -16819,6 +16824,11 @@ Reads domain-owned permissions and Computer Use lifecycle status.
               "browser-cdp"
             ],
             "type": "string"
+          },
+          "backendHandles": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
           },
           "cleanupPending": {
             "maximum": 9007199254740991,
@@ -16861,6 +16871,11 @@ Reads domain-owned permissions and Computer Use lifecycle status.
             "maximum": 9007199254740991,
             "minimum": 0,
             "type": "integer"
+          },
+          "waiters": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -16870,10 +16885,13 @@ Reads domain-owned permissions and Computer Use lifecycle status.
           "effectiveIsolation",
           "leaseScope",
           "activeChannels",
+          "activeRequests",
           "cleanupPending",
           "sessions",
           "requests",
           "activeLeases",
+          "waiters",
+          "backendHandles",
           "reason"
         ],
         "type": "object"
