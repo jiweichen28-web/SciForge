@@ -6,6 +6,7 @@ import io
 import os
 import sys
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -64,13 +65,16 @@ class FakeCdpBackend(CdpAdapterBackend):
         self.performed: list[dict[str, Any]] = []
         self.closed = 0
         self.cancelled = 0
+        self._handle_sequence = 0
+        self.active_handles: set[int] = set()
 
     def configured_url(self) -> str:
         return "http://127.0.0.1:4001" if self.available else ""
 
     def capabilities(self) -> dict[str, Any]:
         return {"backend": self.backend_id, "available": self.available,
-                "effectiveIsolation": self.input_isolation, "activeHandleCount": 0,
+                "effectiveIsolation": self.input_isolation,
+                "activeHandleCount": len(self.active_handles),
                 "supportedTargetKinds": ["browser-page"],
                 "requiresHostFocus": False, "affectsUserInput": False,
                 "usesHostClipboard": False, "activatesTargetForObservation": True}
@@ -83,7 +87,14 @@ class FakeCdpBackend(CdpAdapterBackend):
     def open(self, context):
         assert context.target is not None
         self.opened.append(str(context.target["targetId"]))
-        return {"target": context.target, "revision": "cdp:0", "verification": {}}
+        self._handle_sequence += 1
+        self.active_handles.add(self._handle_sequence)
+        return {
+            "id": self._handle_sequence,
+            "target": context.target,
+            "revision": "cdp:0",
+            "verification": {},
+        }
 
     def observe(self, handle):
         handle["revision"] = "cdp:1"
@@ -111,9 +122,10 @@ class FakeCdpBackend(CdpAdapterBackend):
         self.cancelled += 1
 
     def close(self, handle, reason):
-        del handle, reason
+        del reason
         if self.fail_close:
             raise BackendOperationError("adapter close failed", code="CLEANUP_INCOMPLETE")
+        self.active_handles.discard(handle["id"])
         self.closed += 1
 
 
@@ -128,6 +140,15 @@ def bind(runtime: ComputerUseService, target_id: str = TARGETS[0]["targetId"]):
         "requestId": "bind-1",
         "invocation": trusted("bind-1"),
     }, settle_s=0)
+
+
+def release_sessions(runtime: ComputerUseService, session_ids, prefix: str) -> None:
+    for index, session_id in enumerate(session_ids):
+        assert runtime.release({
+            "computerUseSessionId": session_id,
+            "requestId": f"{prefix}-{index}",
+            "invocation": trusted(f"{prefix}-{index}"),
+        })["ok"] is True
 
 
 def test_real_service_registry_router_and_channel_bind_run_release_target_scope():
@@ -172,7 +193,8 @@ def test_real_service_registry_router_and_channel_bind_run_release_target_scope(
     assert runtime.status() == {
         "backend": "legacy-pyautogui", "effectiveIsolation": "host-approved",
         "leaseScope": "process-global", "activeChannels": 0,
-        "cleanupPending": 0, "sessions": 0, "requests": 0, "activeLeases": 0,
+        "activeRequests": 0, "cleanupPending": 0, "sessions": 0,
+        "requests": 0, "activeLeases": 0, "waiters": 0, "backendHandles": 0,
     }
     assert backend.closed == 1
 
@@ -217,6 +239,503 @@ def test_cancelled_target_request_releases_request_but_keeps_target_lease():
         "invocation": trusted("release-cancel"),
     })["ok"] is True
     assert runtime.status()["activeLeases"] == 0
+
+
+def test_distinct_target_sessions_execute_concurrently_without_cross_target_recovery():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    first_session = bind(runtime, TARGETS[0]["targetId"])["data"]["computerUseSessionId"]
+    second_session = bind(runtime, TARGETS[1]["targetId"])["data"]["computerUseSessionId"]
+    entered = {"alpha": threading.Event(), "beta": threading.Event()}
+    release = threading.Event()
+
+    def execute(request, _channel):
+        entered[request["instruction"]].set()
+        assert release.wait(2), "concurrent executor was not released"
+        return {"ok": True, "data": {"instruction": request["instruction"]}}
+
+    def invoke(instruction: str, session_id: str):
+        return runtime.run({
+            "instruction": instruction,
+            "computerUseSessionId": session_id,
+            "execute": True,
+            "approve": True,
+            "requestId": f"run-{instruction}",
+            "invocation": trusted(f"run-{instruction}"),
+        }, execute, allow_execute=True, settle_s=0)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(invoke, "alpha", first_session)
+        assert entered["alpha"].wait(1)
+        second = pool.submit(invoke, "beta", second_session)
+        both_entered = entered["beta"].wait(1)
+        release.set()
+        results = [first.result(timeout=2), second.result(timeout=2)]
+
+    assert both_entered is True
+    assert all(result["ok"] is True for result in results)
+    assert runtime.status()["requests"] == 0
+    assert runtime.status()["sessions"] == 2
+    assert runtime.status()["activeLeases"] == 2
+    for index, session_id in enumerate((first_session, second_session)):
+        assert runtime.release({
+            "computerUseSessionId": session_id,
+            "requestId": f"release-{index}",
+            "invocation": trusted(f"release-{index}"),
+        })["ok"] is True
+    assert runtime.status()["activeLeases"] == 0
+
+
+def test_same_target_session_allows_only_one_active_request():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_id = bind(runtime, TARGETS[0]["targetId"])["data"]["computerUseSessionId"]
+    entered = threading.Event()
+    release = threading.Event()
+    first_result = []
+    second_executed = []
+
+    def first_execute(_request, _channel):
+        entered.set()
+        assert release.wait(2)
+        return {"ok": True}
+
+    worker = threading.Thread(target=lambda: first_result.append(runtime.run({
+        "instruction": "alpha", "computerUseSessionId": session_id,
+        "execute": True, "approve": True, "requestId": "same-session-first",
+        "invocation": trusted("same-session-first"),
+    }, first_execute, allow_execute=True, settle_s=0)))
+    worker.start()
+    assert entered.wait(1)
+
+    second = runtime.run({
+        "instruction": "beta", "computerUseSessionId": session_id,
+        "execute": True, "approve": True, "requestId": "same-session-second",
+        "invocation": trusted("same-session-second"),
+    }, lambda _request, _channel: second_executed.append(True) or {"ok": True},
+        allow_execute=True, settle_s=0)
+    release.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert first_result[0]["ok"] is True
+    assert second["error"]["code"] == "HOST_INPUT_BUSY"
+    assert second_executed == []
+    assert runtime.status()["requests"] == 0
+    release_sessions(runtime, [session_id], "release-same-session")
+    assert runtime.status()["activeLeases"] == 0
+
+
+def test_bounded_parallel_run_uses_two_real_sessions_and_returns_resource_baseline():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_ids = [
+        bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+        for target in TARGETS
+    ]
+    barrier = threading.Barrier(2)
+
+    def execute(request, _channel):
+        barrier.wait(timeout=2)
+        time.sleep(0.05)
+        return {"ok": True, "data": {"instruction": request["instruction"]}}
+
+    result = runtime.run({
+        "parallel": [
+            {"instruction": "alpha", "computerUseSessionId": session_ids[0]},
+            {"instruction": "beta", "computerUseSessionId": session_ids[1]},
+        ],
+        "execute": True,
+        "approve": True,
+        "requestId": "batch-1",
+        "invocation": trusted("batch-1"),
+    }, execute, allow_execute=True, settle_s=0)
+
+    assert result["ok"] is True
+    assert result["data"]["successCount"] == 2
+    assert result["data"]["failureCount"] == 0
+    assert result["data"]["concurrencyEvidence"]["maxConcurrentExecutions"] == 2, (
+        result["data"]["concurrencyEvidence"], result["data"]["results"]
+    )
+    assert len({item["requestId"] for item in result["data"]["results"]}) == 2
+    status = runtime.status()
+    assert status["requests"] == status["activeRequests"] == 0
+    assert status["sessions"] == status["activeLeases"] == 2
+    assert status["activeChannels"] == status["backendHandles"] == 2
+
+    release_sessions(runtime, session_ids, "release-batch")
+    assert {key: runtime.status()[key] for key in (
+        "sessions", "requests", "activeLeases", "activeChannels", "activeRequests",
+        "cleanupPending", "waiters", "backendHandles",
+    )} == {
+        "sessions": 0, "requests": 0, "activeLeases": 0, "activeChannels": 0,
+        "activeRequests": 0, "cleanupPending": 0, "waiters": 0, "backendHandles": 0,
+    }
+
+
+def test_parent_cancel_latches_before_parallel_children_register_and_cleans_all_maps(monkeypatch):
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_ids = [
+        bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+        for target in TARGETS
+    ]
+    original_begin = runtime.registry.begin
+    begin_entered = threading.Event()
+    allow_begin = threading.Event()
+
+    def delayed_begin(request_id, session_id=None):
+        begin_entered.set()
+        assert allow_begin.wait(2)
+        return original_begin(request_id, session_id)
+
+    monkeypatch.setattr(runtime.registry, "begin", delayed_begin)
+    executed = []
+    batch_result = []
+
+    def execute(request, _channel):
+        executed.append(request["instruction"])
+        return {"ok": True}
+
+    worker = threading.Thread(target=lambda: batch_result.append(runtime.run({
+        "parallel": [
+            {"instruction": "alpha", "computerUseSessionId": session_ids[0]},
+            {"instruction": "beta", "computerUseSessionId": session_ids[1]},
+        ],
+        "execute": True, "approve": True, "requestId": "batch-cancel-early",
+        "invocation": trusted("batch-cancel-early"),
+    }, execute, allow_execute=True, settle_s=0)))
+    worker.start()
+    assert begin_entered.wait(1)
+    cancelled = runtime.cancel({"requestId": "batch-cancel-early"})
+    busy_release = runtime.release({
+        "computerUseSessionId": session_ids[0],
+        "requestId": "release-during-pending-batch",
+        "invocation": trusted("release-during-pending-batch"),
+    })
+    allow_begin.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert cancelled["ok"] is True
+    assert busy_release["error"]["code"] == "HOST_INPUT_BUSY"
+    child_statuses = {item["status"] for item in cancelled["data"]["children"]}
+    assert child_statuses <= {"pending-start", "already-terminal"}
+    assert "pending-start" in child_statuses
+    assert batch_result[0]["data"]["failureCount"] == 2
+    assert executed == []
+    assert runtime.status()["requests"] == 0
+    assert runtime._batch_cancellations == {}
+    assert runtime._batch_children == {}
+    assert runtime._child_batches == {}
+    release_sessions(runtime, session_ids, "release-early-cancel")
+    assert runtime.status()["activeLeases"] == 0
+
+
+def test_exact_child_cancel_does_not_cancel_parallel_survivor():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_ids = [
+        bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+        for target in TARGETS
+    ]
+    entered = {"alpha": threading.Event(), "beta": threading.Event()}
+    release_beta = threading.Event()
+    batch_result = []
+
+    def execute(request, channel):
+        instruction = request["instruction"]
+        entered[instruction].set()
+        if instruction == "alpha":
+            channel.wait(5)
+            raise AssertionError("alpha cancellation should interrupt wait")
+        assert release_beta.wait(2)
+        return {"ok": True, "data": {"instruction": instruction}}
+
+    worker = threading.Thread(target=lambda: batch_result.append(runtime.run({
+        "parallel": [
+            {"instruction": "alpha", "computerUseSessionId": session_ids[0]},
+            {"instruction": "beta", "computerUseSessionId": session_ids[1]},
+        ],
+        "execute": True, "approve": True, "requestId": "batch-child-cancel",
+        "invocation": trusted("batch-child-cancel"),
+    }, execute, allow_execute=True, settle_s=0)))
+    worker.start()
+    assert entered["alpha"].wait(1) and entered["beta"].wait(1)
+    assert {key: runtime.status()[key] for key in (
+        "sessions", "requests", "activeLeases", "activeChannels", "activeRequests",
+        "cleanupPending", "waiters", "backendHandles",
+    )} == {
+        "sessions": 2, "requests": 3, "activeLeases": 2, "activeChannels": 2,
+        "activeRequests": 3, "cleanupPending": 0, "waiters": 0, "backendHandles": 2,
+    }
+    with runtime._lock:
+        alpha_request_id = next(
+            request_id for request_id, channel in runtime._request_channels.items()
+            if channel.handle["target"]["targetId"] == TARGETS[0]["targetId"]
+        )
+    cancelled = runtime.cancel({"requestId": alpha_request_id})
+    release_beta.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert cancelled["data"]["status"] == "accepted"
+    assert backend.cancelled == 1
+    assert batch_result[0]["data"]["successCount"] == 1
+    assert batch_result[0]["data"]["failureCount"] == 1
+    by_target = {item["targetId"]: item["result"] for item in batch_result[0]["data"]["results"]}
+    assert by_target[TARGETS[0]["targetId"]]["error"]["code"] == "CANCEL_PENDING"
+    assert by_target[TARGETS[1]["targetId"]]["ok"] is True
+    assert runtime.status()["requests"] == 0
+    release_sessions(runtime, session_ids, "release-child-cancel")
+    assert runtime.status()["activeLeases"] == 0
+
+
+def test_parent_cancel_delivery_failure_is_diagnostic_and_still_reaches_other_child():
+    class SelectiveCancelBackend(FakeCdpBackend):
+        def __init__(self):
+            super().__init__()
+            self.cancel_targets = []
+
+        def cancel(self, handle, reason):
+            del reason
+            target_id = handle["target"]["targetId"]
+            self.cancel_targets.append(target_id)
+            if target_id == TARGETS[0]["targetId"]:
+                raise BackendOperationError("synthetic child cancellation delivery failure")
+
+    backend = SelectiveCancelBackend()
+    runtime = service(backend)
+    session_ids = [
+        bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+        for target in TARGETS
+    ]
+    both_entered = threading.Barrier(3)
+    batch_result = []
+
+    def execute(_request, channel):
+        both_entered.wait(timeout=2)
+        channel.wait(5)
+        raise AssertionError("parent cancellation should interrupt both children")
+
+    worker = threading.Thread(target=lambda: batch_result.append(runtime.run({
+        "parallel": [
+            {"instruction": "alpha", "computerUseSessionId": session_ids[0]},
+            {"instruction": "beta", "computerUseSessionId": session_ids[1]},
+        ],
+        "execute": True, "approve": True, "requestId": "batch-delivery-failure",
+        "invocation": trusted("batch-delivery-failure"),
+    }, execute, allow_execute=True, settle_s=0)))
+    worker.start()
+    both_entered.wait(timeout=2)
+    cancelled = runtime.cancel({"requestId": "batch-delivery-failure"})
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert cancelled["ok"] is False
+    assert cancelled["error"]["code"] == "CANCEL_DELIVERY_FAILED"
+    statuses = {item["status"] for item in cancelled["error"]["details"]["children"]}
+    assert statuses == {"accepted", "delivery-failed"}
+    assert set(backend.cancel_targets) == {target["targetId"] for target in TARGETS}
+    assert batch_result[0]["data"]["failureCount"] == 2
+    assert runtime.status()["requests"] == 0
+    release_sessions(runtime, session_ids, "release-delivery-failure")
+    assert runtime.status()["activeLeases"] == 0
+
+
+def test_duplicate_parent_request_id_cannot_overwrite_active_batch_ownership():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_ids = [
+        bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+        for target in TARGETS
+    ]
+    entered = threading.Barrier(3)
+    finish = threading.Event()
+    first_result = []
+    batch_input = {
+        "parallel": [
+            {"instruction": "alpha", "computerUseSessionId": session_ids[0]},
+            {"instruction": "beta", "computerUseSessionId": session_ids[1]},
+        ],
+        "execute": True, "approve": True, "requestId": "batch-duplicate",
+        "invocation": trusted("batch-duplicate"),
+    }
+
+    def execute(_request, _channel):
+        entered.wait(timeout=2)
+        assert finish.wait(2)
+        return {"ok": True}
+
+    worker = threading.Thread(target=lambda: first_result.append(runtime.run(
+        batch_input, execute, allow_execute=True, settle_s=0,
+    )))
+    worker.start()
+    entered.wait(timeout=2)
+    duplicate = runtime.run(batch_input, execute, allow_execute=True, settle_s=0)
+    finish.set()
+    worker.join(timeout=3)
+
+    assert duplicate["error"]["code"] == "REQUEST_ID_CONFLICT"
+    assert first_result[0]["data"]["successCount"] == 2
+    assert runtime.status()["requests"] == 0
+    release_sessions(runtime, session_ids, "release-duplicate")
+
+
+def test_target_loss_child_does_not_fail_parallel_survivor():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_ids = [
+        bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+        for target in TARGETS
+    ]
+    barrier = threading.Barrier(2)
+
+    def execute(request, _channel):
+        barrier.wait(timeout=2)
+        if request["instruction"] == "lost":
+            raise ChannelError("TARGET_LOST", "synthetic target closed")
+        return {"ok": True, "data": {"status": "survived"}}
+
+    result = runtime.run({
+        "parallel": [
+            {"instruction": "lost", "computerUseSessionId": session_ids[0]},
+            {"instruction": "survivor", "computerUseSessionId": session_ids[1]},
+        ],
+        "execute": True, "approve": True, "requestId": "batch-target-loss",
+        "invocation": trusted("batch-target-loss"),
+    }, execute, allow_execute=True, settle_s=0)
+
+    assert result["data"]["successCount"] == result["data"]["failureCount"] == 1
+    by_target = {item["targetId"]: item["result"] for item in result["data"]["results"]}
+    assert by_target[TARGETS[0]["targetId"]]["error"]["code"] == "TARGET_LOST"
+    assert by_target[TARGETS[1]["targetId"]]["data"]["status"] == "survived"
+    assert runtime.status()["requests"] == 0
+    release_sessions(runtime, session_ids, "release-target-loss")
+    assert runtime.status()["activeLeases"] == 0
+
+
+def test_parallel_child_deadline_is_local_and_survivor_completes():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_ids = [
+        bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+        for target in TARGETS
+    ]
+    barrier = threading.Barrier(2)
+
+    def execute(request, channel):
+        barrier.wait(timeout=2)
+        if request["instruction"] == "deadline":
+            channel.wait(1)
+            raise AssertionError("deadline should interrupt wait")
+        return {"ok": True, "data": {"status": "survived"}}
+
+    result = runtime.run({
+        "parallel": [
+            {"instruction": "deadline", "computerUseSessionId": session_ids[0], "deadlineMs": 20},
+            {"instruction": "survivor", "computerUseSessionId": session_ids[1]},
+        ],
+        "execute": True, "approve": True, "requestId": "batch-local-deadline",
+        "invocation": trusted("batch-local-deadline"),
+    }, execute, allow_execute=True, settle_s=0)
+
+    assert result["data"]["successCount"] == result["data"]["failureCount"] == 1
+    by_target = {item["targetId"]: item["result"] for item in result["data"]["results"]}
+    assert by_target[TARGETS[0]["targetId"]]["error"]["code"] == "TIMEOUT"
+    assert by_target[TARGETS[1]["targetId"]]["data"]["status"] == "survived"
+    release_sessions(runtime, session_ids, "release-local-deadline")
+    assert runtime.status()["activeLeases"] == 0
+
+
+def test_cancel_after_action_dispatch_preserves_may_have_taken_effect_diagnostics():
+    class BlockingActionBackend(FakeCdpBackend):
+        def __init__(self):
+            super().__init__()
+            self.action_started = threading.Event()
+            self.finish_action = threading.Event()
+
+        def perform(self, handle, action, width, height):
+            self.action_started.set()
+            assert self.finish_action.wait(2)
+            super().perform(handle, action, width, height)
+
+    backend = BlockingActionBackend()
+    runtime = service(backend)
+    session_id = bind(runtime)["data"]["computerUseSessionId"]
+    result = []
+
+    def execute(_request, channel):
+        image = channel.observe()
+        channel.perform({"action": "click", "coordinate": [500, 500]}, *image.size)
+        return {"ok": True}
+
+    worker = threading.Thread(target=lambda: result.append(runtime.run({
+        "instruction": "race", "computerUseSessionId": session_id,
+        "execute": True, "approve": True, "requestId": "run-cancel-race",
+        "invocation": trusted("run-cancel-race"),
+    }, execute, allow_execute=True, settle_s=0)))
+    worker.start()
+    assert backend.action_started.wait(1)
+    cancelled = runtime.cancel({"requestId": "run-cancel-race"})
+    backend.finish_action.set()
+    worker.join(timeout=3)
+
+    assert cancelled["data"]["status"] == "accepted"
+    assert result[0]["error"]["code"] == "CANCEL_PENDING"
+    assert result[0]["error"]["details"] == {
+        "mayHaveTakenEffect": True,
+        "verification": {
+            "status": "verified", "targetId": TARGETS[0]["targetId"],
+        },
+    }
+    assert backend.performed == [{"action": "click", "coordinate": [500, 500]}]
+    assert runtime.status()["requests"] == 0
+    release_sessions(runtime, [session_id], "release-cancel-race")
+
+
+def test_repeated_parallel_success_and_failure_returns_all_resource_maps_to_baseline():
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    resource_keys = (
+        "sessions", "requests", "activeLeases", "activeChannels", "activeRequests",
+        "cleanupPending", "waiters", "backendHandles",
+    )
+
+    for iteration in range(20):
+        session_ids = [
+            bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+            for target in TARGETS
+        ]
+        barrier = threading.Barrier(2)
+
+        def execute(request, _channel):
+            barrier.wait(timeout=2)
+            if iteration % 2 and request["instruction"] == "alpha":
+                raise ChannelError("TARGET_LOST", "synthetic repeated target loss")
+            return {"ok": True, "data": {"status": "done"}}
+
+        result = runtime.run({
+            "parallel": [
+                {"instruction": "alpha", "computerUseSessionId": session_ids[0]},
+                {"instruction": "beta", "computerUseSessionId": session_ids[1]},
+            ],
+            "execute": True, "approve": True,
+            "requestId": f"batch-repeat-{iteration}",
+            "invocation": trusted(f"batch-repeat-{iteration}"),
+        }, execute, allow_execute=True, settle_s=0)
+        assert result["data"]["successCount"] == (1 if iteration % 2 else 2)
+        assert runtime.status()["requests"] == 0
+        release_sessions(runtime, session_ids, f"release-repeat-{iteration}")
+        assert {key: runtime.status()[key] for key in resource_keys} == {
+            key: 0 for key in resource_keys
+        }
+        assert backend.active_handles == set()
+
+    assert backend.closed == 40
+    assert runtime._request_channels == {}
+    assert runtime._sessions == {}
+    assert runtime._cleanup_pending == set()
 
 
 def test_failed_target_release_is_quarantined_until_reclaim_succeeds():
@@ -285,6 +804,59 @@ def test_invalid_planner_response_fails_before_backend_dispatch_and_releases_req
         "invocation": trusted("release-invalid-plan"),
     })["ok"] is True
     assert runtime.status()["activeLeases"] == 0
+
+
+def test_planner_deadline_returns_partial_trace_after_completed_action(monkeypatch, tmp_path):
+    backend = FakeCdpBackend()
+    runtime = service(backend)
+    session_id = bind(runtime)["data"]["computerUseSessionId"]
+    assert runtime.configure_model_access(
+        "http://127.0.0.1:4567/v1", "bridge-token", "active-agent",
+    )["ok"] is True
+    config = Config(
+        model_router_api_key="unused", allow_execute=True, max_steps=2,
+        artifact_dir=str(tmp_path),
+    )
+    calls = 0
+
+    def planner(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return (
+                'Action: click Submit\n<tool_call>'
+                '{"name":"computer_use","arguments":{"action":"click","coordinate":[500,500]}}'
+                '</tool_call>'
+            )
+        time.sleep(0.06)
+        raise requests.Timeout("planner response exceeded child deadline")
+
+    monkeypatch.setattr(owl_agent, "call_owl", planner)
+    result = runtime.run({
+        "instruction": "click then continue",
+        "computerUseSessionId": session_id,
+        "deadlineMs": 40,
+        "execute": True,
+        "approve": True,
+        "requestId": "run-partial-timeout",
+        "invocation": trusted("run-partial-timeout"),
+    }, lambda request, channel: run_task(
+        runtime.planner_config(config, channel), request["instruction"], channel,
+        execute=True, approve=True,
+    ), allow_execute=True, settle_s=0)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "TIMEOUT"
+    partial = result["error"]["details"]
+    assert partial["status"] == "timed_out"
+    assert partial["stepCount"] == 1
+    assert partial["steps"][0]["executed"] is True
+    assert partial["targetId"] == TARGETS[0]["targetId"]
+    assert partial["backend"] == "browser-cdp"
+    assert partial["requestedIsolation"] == "host-app-scoped"
+    assert partial["effectiveIsolation"] == "host-app-scoped"
+    assert partial["finalObservation"]["revision"] == "cdp:1"
+    assert runtime.status()["requests"] == 0
 
 
 def test_cdp_unavailable_never_falls_back_to_legacy():
@@ -370,6 +942,92 @@ def test_post_dispatch_transport_loss_is_unknown_single_write_with_one_readback(
     assert caught.value.details["targetId"] == TARGETS[0]["targetId"]
     assert transport.paths.count("/action") == 1
     assert transport.paths.count("/observe") == 1
+
+
+class ParallelTransportLossSession:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.handles: dict[str, dict[str, Any]] = {}
+        self.action_counts: dict[str, int] = {}
+        self.observe_counts: dict[str, int] = {}
+
+    def request(self, method, url, **kwargs):
+        path = url.split("/v1", 1)[1]
+        body = kwargs.get("json") or {}
+        if method == "GET" and path == "/targets":
+            return FakeResponse({"ok": True, "data": {"targets": TARGETS}})
+        if path == "/handles/open":
+            target = body["target"]
+            handle_id = f"handle-{target['targetId'].rsplit('-', 1)[-1]}"
+            with self._lock:
+                self.handles[handle_id] = target
+            return FakeResponse({"ok": True, "data": {
+                "handleId": handle_id, "targetId": target["targetId"],
+                "generation": target["generation"],
+            }})
+        if path == "/action":
+            handle_id = body["handleId"]
+            with self._lock:
+                self.action_counts[handle_id] = self.action_counts.get(handle_id, 0) + 1
+            raise requests.ConnectionError("response lost after target-scoped dispatch")
+        if path == "/observe":
+            handle_id = body["handleId"]
+            with self._lock:
+                target = self.handles[handle_id]
+                self.observe_counts[handle_id] = self.observe_counts.get(handle_id, 0) + 1
+                revision = self.observe_counts[handle_id]
+            image = Image.new("RGB", (2, 2), "white")
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return FakeResponse({"ok": True, "data": {
+                "targetId": target["targetId"], "generation": target["generation"],
+                "revision": f"cdp:{revision}", "imageBase64": base64.b64encode(buffer.getvalue()).decode(),
+                "metadata": {"url": target["metadata"]["url"], "semanticTree": [
+                    {"tag": "output", "name": f"readback-{handle_id}"},
+                ]},
+            }})
+        if path == "/handles/close":
+            with self._lock:
+                self.handles.pop(body["handleId"], None)
+            return FakeResponse({"ok": True, "data": {"closed": True}})
+        raise AssertionError((method, path))
+
+
+def test_parallel_post_dispatch_losses_each_write_once_read_back_once_and_never_replay():
+    transport = ParallelTransportLossSession()
+    backend = CdpAdapterBackend(session=transport)
+    backend.configure("http://127.0.0.1:4001", "test-token")
+    runtime = ComputerUseService(SessionRegistry(), BackendRouter([backend]))
+    session_ids = [
+        bind(runtime, target["targetId"])["data"]["computerUseSessionId"]
+        for target in TARGETS
+    ]
+
+    def execute(_request, channel):
+        image = channel.observe()
+        channel.perform({"action": "type", "text": "one-write"}, *image.size)
+        raise AssertionError("transport loss must not be treated as success")
+
+    result = runtime.run({
+        "parallel": [
+            {"instruction": "alpha", "computerUseSessionId": session_ids[0]},
+            {"instruction": "beta", "computerUseSessionId": session_ids[1]},
+        ],
+        "execute": True, "approve": True, "requestId": "batch-transport-loss",
+        "invocation": trusted("batch-transport-loss"),
+    }, execute, allow_execute=True, settle_s=0)
+
+    assert result["data"]["successCount"] == 0
+    assert result["data"]["failureCount"] == 2
+    assert {item["result"]["error"]["code"] for item in result["data"]["results"]} == {
+        "ACTION_OUTCOME_UNKNOWN",
+    }
+    assert set(transport.action_counts.values()) == {1}
+    assert set(transport.observe_counts.values()) == {2}
+    assert runtime.status()["requests"] == 0
+    release_sessions(runtime, session_ids, "release-transport-loss")
+    assert transport.handles == {}
+    assert runtime.status()["backendHandles"] == 0
 
 
 class OpenGenerationMismatchSession:

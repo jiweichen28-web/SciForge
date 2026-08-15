@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from dataclasses import replace
 from typing import Any, Callable
 
@@ -38,6 +41,10 @@ class ComputerUseService:
         self._sessions: dict[str, SessionInputChannel] = {}
         self._session_targets: dict[str, dict[str, Any]] = {}
         self._cleanup_pending: set[str] = set()
+        self._batch_cancellations: dict[str, threading.Event] = {}
+        self._batch_children: dict[str, dict[str, str]] = {}
+        self._child_batches: dict[str, str] = {}
+        self._batch_sessions: set[str] = set()
         self._model_access: dict[str, str] = {}
         self._lock = threading.RLock()
 
@@ -46,7 +53,7 @@ class ComputerUseService:
     ) -> dict[str, Any]:
         backend = self._cdp()
         with self._lock:
-            if self._sessions or self._request_channels or self._cleanup_pending:
+            if self._sessions or self._request_channels or self._cleanup_pending or self._batch_cancellations:
                 return R.err("HOST_INPUT_BUSY", "CDP adapter cannot change while resources are active")
             if not adapter_url and expected_adapter_url and backend.configured_url() != expected_adapter_url:
                 return R.ok({"configured": bool(backend.configured_url()), "cleared": False})
@@ -60,7 +67,7 @@ class ComputerUseService:
         self, base_url: str, api_key: str, model: str, *, expected_base_url: str = ""
     ) -> dict[str, Any]:
         with self._lock:
-            if self._request_channels:
+            if self._request_channels or self._batch_cancellations:
                 return R.err("HOST_INPUT_BUSY", "planner access cannot change while requests are active")
             current = self._model_access.get("base_url", "")
             if not base_url and expected_base_url and current != expected_base_url:
@@ -191,7 +198,9 @@ class ComputerUseService:
         session_id = str(value.get("computerUseSessionId") or "")
         with self._lock:
             channel = self._sessions.get(session_id)
-            active = channel is not None and channel in self._request_channels.values()
+            active = channel is not None and (
+                channel in self._request_channels.values() or session_id in self._batch_sessions
+            )
             if channel is None:
                 return R.err("NOT_FOUND", "Computer Use session is unavailable")
             if active:
@@ -224,7 +233,6 @@ class ComputerUseService:
             return R.err("INVALID_ARGUMENT", str(error))
         request_id = request.get("requestId") or f"request-{uuid.uuid4()}"
         request["requestId"] = request_id
-        session_id = request.get("computerUseSessionId")
         if request["execute"] and not (
             request["approve"] and allow_execute and
             _trusted_invocation(request.get("invocation"), request_id)
@@ -235,24 +243,50 @@ class ComputerUseService:
                 blocked_reason="external-side-effect-requires-approval",
             )
 
+        recovery = self.reclaim_pending()
+        if not recovery["ok"]:
+            return recovery
+        if "parallel" in request:
+            return self._run_parallel(
+                request, request_id, executor,
+                allow_execute=allow_execute, settle_s=settle_s,
+            )
+        return self._run_single(
+            request, executor, settle_s=settle_s,
+            screenshot_provider=screenshot_provider,
+        )
+
+    def _run_single(
+        self,
+        request: dict[str, Any],
+        executor: ChannelExecutor,
+        *,
+        settle_s: float,
+        screenshot_provider=None,
+        inherited_cancellation: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        request_id = str(request["requestId"])
+        session_id = request.get("computerUseSessionId")
+
         ownership_acquired = False
         persistent_session = bool(session_id)
         channel: SessionInputChannel | None = None
         cleanup_errors: list[str] = []
         result: dict[str, Any]
         try:
-            recovery = self.reclaim_pending()
-            if not recovery["ok"]:
-                return recovery
             if session_id:
                 with self._lock:
+                    if inherited_cancellation is None and session_id in self._batch_sessions:
+                        raise RegistryError("HOST_INPUT_BUSY", "Computer Use session belongs to an active batch")
                     cancellation = self.registry.begin(request_id, session_id)
                     ownership_acquired = True
                     channel = self._sessions.get(session_id)
                     if channel is None:
                         raise RegistryError("NOT_FOUND", "Computer Use session is unavailable")
-                    channel.request_id = request_id
-                    channel.cancellation = cancellation
+                    channel.begin_request(
+                        request_id, cancellation, request.get("deadlineMs"),
+                        request.get("requestedIsolation"),
+                    )
                     self._request_channels[request_id] = channel
             else:
                 cancellation = self.registry.begin(request_id, session_id)
@@ -269,8 +303,16 @@ class ComputerUseService:
                     request_id=request_id, cancellation=cancellation,
                     backend=backend, handle=handle,
                 )
+                channel.begin_request(
+                    request_id, cancellation, request.get("deadlineMs"),
+                    request.get("requestedIsolation"),
+                )
                 with self._lock:
                     self._request_channels[request_id] = channel
+            if inherited_cancellation is not None and inherited_cancellation.is_set():
+                cancellation.set()
+            if channel.cancelled:
+                raise ChannelError("CANCEL_PENDING", "request was cancelled before execution")
             result = executor(request, channel)
         except RegistryError as error:
             result = R.err(error.code, str(error))
@@ -299,17 +341,151 @@ class ComputerUseService:
             )
         return result
 
+    def _run_parallel(
+        self,
+        request: dict[str, Any],
+        parent_request_id: str,
+        executor: ChannelExecutor,
+        *,
+        allow_execute: bool,
+        settle_s: float,
+    ) -> dict[str, Any]:
+        del allow_execute  # top-level approval was checked once before the batch started
+        batch_started = time.time()
+        entries = list(request["parallel"])
+        try:
+            self.registry.reserve(parent_request_id)
+        except RegistryError as error:
+            return R.err(error.code, str(error))
+        parent_cancellation = threading.Event()
+        with self._lock:
+            session_ids = [str(entry["computerUseSessionId"]) for entry in entries]
+            if any(session_id not in self._sessions for session_id in session_ids):
+                self.registry.release_reservation(parent_request_id)
+                return R.err("NOT_FOUND", "one or more Computer Use sessions are unavailable")
+            if any(session_id in self._batch_sessions for session_id in session_ids):
+                self.registry.release_reservation(parent_request_id)
+                return R.err("HOST_INPUT_BUSY", "one or more Computer Use sessions are already in a batch")
+            self._batch_sessions.update(session_ids)
+            self._batch_cancellations[parent_request_id] = parent_cancellation
+            self._batch_children[parent_request_id] = {}
+
+        def run_child(index: int, entry: dict[str, Any]) -> dict[str, Any]:
+            child_request_id = f"request-{uuid.uuid4()}"
+            session_id = entry["computerUseSessionId"]
+            with self._lock:
+                self._batch_children[parent_request_id][child_request_id] = "pending-start"
+                self._child_batches[child_request_id] = parent_request_id
+                target = dict(self._session_targets.get(session_id) or {})
+            started = time.time()
+            try:
+                if parent_cancellation.is_set():
+                    result = R.err("CANCEL_PENDING", "batch was cancelled before child start")
+                else:
+                    with self._lock:
+                        self._batch_children[parent_request_id][child_request_id] = "starting"
+                    child_request = {
+                        "instruction": entry["instruction"],
+                        "computerUseSessionId": session_id,
+                        "requestId": child_request_id,
+                        "execute": request["execute"],
+                        "approve": request["approve"],
+                        "requestedIsolation": "host-app-scoped",
+                        **({"deadlineMs": entry["deadlineMs"]} if "deadlineMs" in entry else {}),
+                    }
+                    result = self._run_single(
+                        child_request, executor, settle_s=settle_s,
+                        inherited_cancellation=parent_cancellation,
+                    )
+                return {
+                    "index": index,
+                    "computerUseSessionId": session_id,
+                    "targetId": str(target.get("targetId") or ""),
+                    "requestId": child_request_id,
+                    "startedAt": _iso_time(started),
+                    "completedAt": _iso_time(time.time()),
+                    "result": result,
+                }
+            finally:
+                with self._lock:
+                    children = self._batch_children.get(parent_request_id)
+                    if children is not None:
+                        children[child_request_id] = "terminal"
+
+        try:
+            with ThreadPoolExecutor(max_workers=len(entries)) as pool:
+                futures = [pool.submit(run_child, index, entry) for index, entry in enumerate(entries)]
+                children = [future.result() for future in futures]
+            children.sort(key=lambda child: int(child["index"]))
+            for child in children:
+                child.pop("index", None)
+            success_count = sum(child["result"].get("ok") is True for child in children)
+            return R.ok({
+                "status": "cancelled" if parent_cancellation.is_set() else "completed",
+                "requestedCount": len(children),
+                "successCount": success_count,
+                "failureCount": len(children) - success_count,
+                "results": children,
+                "concurrencyEvidence": _batch_overlap(children),
+            }, summary=(
+                f"parallel Computer Use completed: {success_count} succeeded, "
+                f"{len(children) - success_count} failed"
+            ), prov=R.provenance("computer_use_parallel", parent_request_id, batch_started))
+        finally:
+            with self._lock:
+                children = self._batch_children.pop(parent_request_id, {})
+                for child_request_id in children:
+                    self._child_batches.pop(child_request_id, None)
+                self._batch_cancellations.pop(parent_request_id, None)
+                self._batch_sessions.difference_update(
+                    str(entry["computerUseSessionId"]) for entry in entries
+                )
+            self.registry.release_reservation(parent_request_id)
+
     def cancel(self, value: object) -> dict[str, Any]:
         if not isinstance(value, dict) or not isinstance(value.get("requestId"), str):
             return R.err("INVALID_ARGUMENT", "requestId is required")
         request_id = value["requestId"]
+        with self._lock:
+            batch_cancellation = self._batch_cancellations.get(request_id)
+            batch_children = dict(self._batch_children.get(request_id, {}))
+        if batch_cancellation is not None:
+            batch_cancellation.set()
+            statuses = []
+            delivery_errors = []
+            for child_request_id, state in batch_children.items():
+                if state == "terminal":
+                    statuses.append({"requestId": child_request_id, "status": "already-terminal"})
+                    continue
+                cancelled = self.registry.cancel(child_request_id)
+                with self._lock:
+                    channel = self._request_channels.get(child_request_id)
+                errors = channel.cancel_backend("parent_cancel") if cancelled and channel else []
+                status = "accepted" if cancelled else "pending-start"
+                if errors:
+                    status = "delivery-failed"
+                    delivery_errors.append({"requestId": child_request_id, "errors": errors})
+                statuses.append({"requestId": child_request_id, "status": status})
+            if delivery_errors:
+                return R.err(
+                    "CANCEL_DELIVERY_FAILED",
+                    "batch cancellation was recorded but backend delivery was incomplete",
+                    retryable=True,
+                    details={"requestId": request_id, "children": statuses, "deliveryErrors": delivery_errors},
+                )
+            return R.ok({"requestId": request_id, "status": "accepted", "children": statuses})
         cancelled = self.registry.cancel(request_id)
         with self._lock:
             channel = self._request_channels.get(request_id)
+            parent_request_id = self._child_batches.get(request_id)
         errors = channel.cancel_backend("client_cancel") if cancelled and channel else []
         if errors:
             return R.err("CLEANUP_INCOMPLETE", "backend cancellation failed", details={"errors": errors})
-        return R.ok({"requestId": request_id, "status": "accepted" if cancelled else "not-found"})
+        return R.ok({
+            "requestId": request_id,
+            "status": "accepted" if cancelled else "not-found",
+            **({"parentRequestId": parent_request_id} if parent_request_id else {}),
+        })
 
     def reclaim(self, resource_id: str) -> dict[str, Any]:
         with self._lock:
@@ -318,7 +494,9 @@ class ComputerUseService:
             channel = session or request
             if channel is None:
                 return R.ok({"resourceId": resource_id, "reclaimed": False})
-            if session is not None and channel in self._request_channels.values():
+            if session is not None and (
+                channel in self._request_channels.values() or resource_id in self._batch_sessions
+            ):
                 return R.err("HOST_INPUT_BUSY", "session has an active request")
             errors = channel.close("reclaim")
             if errors:
@@ -356,10 +534,13 @@ class ComputerUseService:
             "effectiveIsolation": "host-app-scoped" if "browser-cdp" in session_backends else "host-approved",
             "leaseScope": "target" if "browser-cdp" in session_backends else "process-global",
             "activeChannels": len(unique_channels),
+            "activeRequests": snapshot.requests,
             "cleanupPending": cleanup_pending,
             "sessions": snapshot.sessions,
             "requests": snapshot.requests,
             "activeLeases": snapshot.active_leases,
+            "waiters": 0,
+            "backendHandles": len(unique_channels),
         }
 
     def _forget_session(self, session_id: str) -> None:
@@ -374,6 +555,33 @@ class ComputerUseService:
         if not isinstance(backend, CdpAdapterBackend):
             raise RuntimeError("CDP backend is unavailable")
         return backend
+
+
+def _iso_time(value: float) -> str:
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _batch_overlap(children: list[dict[str, Any]]) -> dict[str, Any]:
+    intervals = [
+        (
+            datetime.fromisoformat(child["startedAt"].replace("Z", "+00:00")).timestamp(),
+            datetime.fromisoformat(child["completedAt"].replace("Z", "+00:00")).timestamp(),
+        )
+        for child in children
+    ]
+    common = max(0.0, min(end for _, end in intervals) - max(start for start, _ in intervals))
+    points = sorted(
+        [(start, 1) for start, _ in intervals] + [(end, -1) for _, end in intervals],
+        key=lambda item: (item[0], item[1]),
+    )
+    active = maximum = 0
+    for _, delta in points:
+        active += delta
+        maximum = max(maximum, active)
+    return {
+        "commonExecutionOverlapMs": round(common * 1000, 3),
+        "maxConcurrentExecutions": maximum,
+    }
 
 
 def _trusted_invocation(value: object, request_id: str) -> bool:

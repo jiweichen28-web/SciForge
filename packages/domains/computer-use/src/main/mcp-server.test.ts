@@ -150,6 +150,52 @@ describe('domain-owned Computer Use MCP server', () => {
     }
   })
 
+  it('validates and forwards one approved bounded parallel batch under the parent identity', async () => {
+    const requests: Record<string, unknown>[] = []
+    const sidecar = await startFakeSidecar(async (request, response) => {
+      requests.push(await readJsonBody(request))
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({
+        ok: true,
+        data: { requestedCount: 2, successCount: 2, failureCount: 0, results: [] }
+      }))
+    })
+    const server = createComputerUseMcpServer({
+      serviceUrl: sidecar.url, serviceToken: 'sidecar-token', timeoutMs: 5_000
+    })
+    const client = new Client({ name: 'test', version: '0.1.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+      const result = await client.callTool({
+        name: COMPUTER_USE_MCP_TOOL_NAME,
+        arguments: {
+          parallel: [
+            { instruction: 'alpha', computerUseSessionId: 'session-a', deadlineMs: 5_000 },
+            { instruction: 'beta', computerUseSessionId: 'session-b' }
+          ]
+        },
+        _meta: trustedMeta
+      })
+      expect(result.isError).toBeUndefined()
+      expect(requests).toHaveLength(1)
+      expect(requests[0]).toMatchObject({
+        parallel: [
+          { instruction: 'alpha', computerUseSessionId: 'session-a', deadlineMs: 5_000 },
+          { instruction: 'beta', computerUseSessionId: 'session-b' }
+        ],
+        execute: true,
+        approve: true,
+        requestId: 'request-1',
+        invocation: trustedMeta['io.sciforge/computer-use-invocation']
+      })
+      expect(requests[0]).not.toHaveProperty('instruction')
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
   it('cancels the exact trusted request identity when the sidecar call times out', async () => {
     let releaseRun!: () => void
     const runReleased = new Promise<void>((resolve) => { releaseRun = resolve })

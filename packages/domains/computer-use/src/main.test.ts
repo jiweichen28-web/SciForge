@@ -48,10 +48,13 @@ describe('Computer Use main contribution', () => {
         effectiveIsolation: 'host-approved',
         leaseScope: 'process-global',
         activeChannels: 1,
+        activeRequests: 1,
         cleanupPending: 0,
         sessions: 1,
         requests: 1,
-        activeLeases: 1
+        activeLeases: 1,
+        waiters: 0,
+        backendHandles: 1
       }
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
     try {
@@ -69,10 +72,13 @@ describe('Computer Use main contribution', () => {
         effectiveIsolation: 'host-approved',
         leaseScope: 'process-global',
         activeChannels: 1,
+        activeRequests: 1,
         cleanupPending: 0,
         sessions: 1,
         requests: 1,
         activeLeases: 1,
+        waiters: 0,
+        backendHandles: 1,
         reason: null
       })
     } finally {

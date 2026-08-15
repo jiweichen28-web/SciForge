@@ -78,10 +78,13 @@ def assert_baseline(service: ComputerUseService) -> None:
         "effectiveIsolation": "host-approved",
         "leaseScope": "process-global",
         "activeChannels": 0,
+        "activeRequests": 0,
         "cleanupPending": 0,
         "sessions": 0,
         "requests": 0,
         "activeLeases": 0,
+        "waiters": 0,
+        "backendHandles": 0,
     }
 
 

@@ -23,4 +23,31 @@ describe('Computer Use v1 contract', () => {
     expect(computerUseV1InputSchema.safeParse({ instruction: 'submit', computerUseSessionId: 'session-1' }).success)
       .toBe(false)
   })
+
+  it('accepts a bounded parallel batch with unique bound sessions only', () => {
+    expect(computerUseRunInputSchema.parse({
+      parallel: [
+        { instruction: 'alpha', computerUseSessionId: 'session-a', deadlineMs: 5_000 },
+        { instruction: 'beta', computerUseSessionId: 'session-b' }
+      ]
+    })).toEqual({
+      parallel: [
+        { instruction: 'alpha', computerUseSessionId: 'session-a', deadlineMs: 5_000 },
+        { instruction: 'beta', computerUseSessionId: 'session-b' }
+      ]
+    })
+    expect(computerUseRunInputSchema.safeParse({
+      parallel: [
+        { instruction: 'alpha', computerUseSessionId: 'session-a' },
+        { instruction: 'beta', computerUseSessionId: 'session-a' }
+      ]
+    }).success).toBe(false)
+    expect(computerUseRunInputSchema.safeParse({
+      instruction: 'top-level',
+      parallel: [
+        { instruction: 'alpha', computerUseSessionId: 'session-a' },
+        { instruction: 'beta', computerUseSessionId: 'session-b' }
+      ]
+    }).success).toBe(false)
+  })
 })

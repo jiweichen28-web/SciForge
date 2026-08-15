@@ -9,10 +9,38 @@ export type ComputerUseV1Input = z.infer<typeof computerUseV1InputSchema>
 
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/)
 
-export const computerUseRunInputSchema = z.object({
+const computerUseParallelEntrySchema = z.object({
   instruction: z.string().trim().min(1).max(16_384),
-  computerUseSessionId: safeId.optional()
+  computerUseSessionId: safeId,
+  deadlineMs: z.number().int().min(1).max(600_000).optional()
 }).strict()
+
+export const computerUseRunInputSchema = z.object({
+  instruction: z.string().trim().min(1).max(16_384).optional(),
+  computerUseSessionId: safeId.optional(),
+  deadlineMs: z.number().int().min(1).max(600_000).optional(),
+  parallel: z.array(computerUseParallelEntrySchema).min(2).max(8).optional()
+}).strict().superRefine((input, context) => {
+  if (input.parallel) {
+    if (input.instruction !== undefined || input.computerUseSessionId !== undefined || input.deadlineMs !== undefined) {
+      context.addIssue({ code: 'custom', message: 'parallel entries own instruction, session and deadline fields' })
+    }
+    const sessions = new Set<string>()
+    input.parallel.forEach((entry, index) => {
+      if (sessions.has(entry.computerUseSessionId)) {
+        context.addIssue({
+          code: 'custom', path: ['parallel', index, 'computerUseSessionId'],
+          message: 'parallel computerUseSessionId values must be unique'
+        })
+      }
+      sessions.add(entry.computerUseSessionId)
+    })
+    return
+  }
+  if (input.instruction === undefined) {
+    context.addIssue({ code: 'custom', path: ['instruction'], message: 'instruction is required' })
+  }
+})
 
 export const computerUseTargetSchema = z.object({
   targetId: safeId,
@@ -58,10 +86,13 @@ export const computerUseRuntimeStatusSchema = z.object({
   effectiveIsolation: z.enum(['host-approved', 'host-app-scoped']),
   leaseScope: z.enum(['process-global', 'target']),
   activeChannels: z.number().int().nonnegative(),
+  activeRequests: z.number().int().nonnegative(),
   cleanupPending: z.number().int().nonnegative(),
   sessions: z.number().int().nonnegative(),
   requests: z.number().int().nonnegative(),
   activeLeases: z.number().int().nonnegative(),
+  waiters: z.number().int().nonnegative(),
+  backendHandles: z.number().int().nonnegative(),
   reason: z.string().nullable()
 }).strict()
 

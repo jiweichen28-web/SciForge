@@ -85,7 +85,8 @@ export function createComputerUseMcpServer(
     description: [
       'Execute one instruction.',
       'Omit computerUseSessionId for Backend: Legacy/PyAutoGUI. Isolation: host-approved. Lease: process-global.',
-      'Provide a bound computerUseSessionId for Backend: browser-cdp. Isolation: host-app-scoped.',
+      'Provide a bound computerUseSessionId, or a bounded parallel batch with two to eight unique bound sessions,',
+      'for Backend: browser-cdp. Isolation: host-app-scoped.',
       'Returns a ServiceResult trace; the caller must verify task completion.'
     ].join(' '),
     inputSchema: computerUseRunInputSchema,

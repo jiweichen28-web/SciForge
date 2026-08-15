@@ -6,6 +6,7 @@ import os
 import platform as _platform
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from driver.channel import ChannelError, SessionInputChannel
@@ -70,6 +71,8 @@ def _run_loop(
     started: float,
 ) -> Dict[str, Any]:
     image = channel.observe()
+    observation = channel.canonical_observation() or {}
+    latest_revision = str(observation.get("revision") or "")
     status = "exhausted_steps"
     answer_text = ""
     steps: List[Dict[str, Any]] = []
@@ -80,6 +83,27 @@ def _run_loop(
     action_outcomes: List[str] = []
     replan_hint = False
 
+    def partial_trace(status_override: str | None = None) -> Dict[str, Any]:
+        return {
+            "status": status_override or status,
+            "executed": really_execute,
+            "instruction": instruction,
+            "answer": answer_text,
+            "platform": _OS_NAME,
+            "screen": list(image.size),
+            "steps": steps,
+            "stepCount": len(steps),
+            "targetId": str(observation.get("targetId") or "host-desktop"),
+            "backend": channel.backend.backend_id,
+            "requestedIsolation": channel.requested_isolation,
+            "effectiveIsolation": channel.backend.input_isolation,
+            "degraded": False,
+            "finalObservation": {
+                "revision": latest_revision,
+                "semanticTree": list(observation.get("semanticTree") or [])[:256],
+            },
+        }
+
     for index in range(cfg.max_steps):
         if channel.cancelled:
             status = "cancelled"
@@ -89,6 +113,12 @@ def _run_loop(
         artifacts.append(R.artifact_ref("screenshot", f"step {index} screenshot", path=shot_path))
         width, height = image.size
         try:
+            remaining = channel.remaining_seconds
+            if remaining is not None and remaining <= 0:
+                raise ChannelError(
+                    "TIMEOUT", "request deadline expired before model call",
+                    details=partial_trace("timed_out"),
+                )
             messages = owl_agent.build_messages(
                 instruction,
                 history,
@@ -102,9 +132,23 @@ def _run_loop(
                 cfg.model_router_model,
                 cfg.model_router_api_key,
                 messages,
+                timeout=min(120.0, remaining) if remaining is not None else 120.0,
                 canonical_observation=channel.canonical_observation(),
             )
+        except ChannelError:
+            raise
         except Exception as error:  # noqa: BLE001
+            if channel.cancelled:
+                raise ChannelError(
+                    "CANCEL_PENDING", "request was cancelled during model call",
+                    details=partial_trace("cancelled"),
+                ) from error
+            remaining = channel.remaining_seconds
+            if remaining is not None and remaining <= 0:
+                raise ChannelError(
+                    "TIMEOUT", "request deadline expired during model call",
+                    details=partial_trace("timed_out"),
+                ) from error
             details = {"step": index, "plannerError": type(error).__name__}
             if isinstance(error, owl_agent.ModelCallError):
                 details["plannerErrorMessage"] = str(error)
@@ -117,6 +161,12 @@ def _run_loop(
         if channel.cancelled:
             status = "cancelled"
             break
+        remaining = channel.remaining_seconds
+        if remaining is not None and remaining <= 0:
+            raise ChannelError(
+                "TIMEOUT", "request deadline expired during model call",
+                details=partial_trace("timed_out"),
+            )
 
         args = owl_agent.extract_action(output_text)
         action_type = (args.get("action") if args else "") or ""
@@ -172,11 +222,19 @@ def _run_loop(
             continue
 
         before_image = image
+        action_started = time.time()
         channel.perform(args, width, height)
+        action_completed = time.time()
         step_record["executed"] = True
+        step_record["timeline"] = {
+            "actionStartedAt": _iso_time(action_started),
+            "actionCompletedAt": _iso_time(action_completed),
+        }
         if channel.last_verification:
             step_record["verification"] = dict(channel.last_verification)
         after_image = channel.observe()
+        observation = channel.canonical_observation() or observation
+        latest_revision = str(observation.get("revision") or latest_revision)
         if cfg.reflect:
             try:
                 reflection = reflector.reflect(
@@ -214,21 +272,14 @@ def _run_loop(
     if answer_text:
         summary += f" answer: {answer_text[:200]}"
     width, height = image.size
-    data = {
-        "status": status,
-        "executed": really_execute,
-        "instruction": instruction,
-        "answer": answer_text,
-        "platform": _OS_NAME,
-        "screen": [width, height],
-        "steps": steps,
-        "stepCount": len(steps),
-        "backend": channel.backend.backend_id,
-        "effectiveIsolation": channel.backend.input_isolation,
-    }
+    data = partial_trace()
     return R.ok(
         data,
         summary=summary,
         artifacts=artifacts,
         prov=R.provenance("computer_use_run", channel.request_id, started),
     )
+
+
+def _iso_time(value: float) -> str:
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")

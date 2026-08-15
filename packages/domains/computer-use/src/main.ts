@@ -311,10 +311,13 @@ async function readComputerUseRuntimeStatus(): Promise<z.infer<typeof computerUs
     effectiveIsolation: 'host-approved' as const,
     leaseScope: 'process-global' as const,
     activeChannels: 0,
+    activeRequests: 0,
     cleanupPending: 0,
     sessions: 0,
     requests: 0,
     activeLeases: 0,
+    waiters: 0,
+    backendHandles: 0,
     reason
   })
   if (!/^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/i.test(serviceUrl)) {

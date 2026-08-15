@@ -6,7 +6,9 @@ generic settings/status capabilities, MCP launch contribution, trusted
 invocation metadata rule, CDP adapter lifecycle, and Agent planner bridge.
 
 The managed MCP exposes capability/target discovery, target bind, run, and
-release. Bind/run/release require Host-trusted approval metadata. A bound
+release. One approved run may contain a bounded `parallel` batch of two to
+eight unique bound sessions; each child has its own request identity and
+optional deadline. Bind/run/release require Host-trusted approval metadata. A bound
 browser page gets a canonical ID and generation plus one target lease; every
 observation, action, navigation readback, and verification stays on that exact
 page. There is no CDP-to-PyAutoGUI fallback. The old `{ instruction }` call
@@ -32,6 +34,10 @@ ownership on cleanup failure; post-dispatch transport loss is reported as
 `ACTION_OUTCOME_UNKNOWN`, is never replayed, and permits only one bounded
 target-scoped readback.
 
-This layer supports attached Playwright `browser-page` targets. UIA, macOS AX,
-Remote Worker, isolated desktop, and concurrent multi-session orchestration are
-outside this package layer.
+This layer supports attached Playwright `browser-page` targets. Distinct target
+sessions may execute concurrently, while the Legacy path retains its single
+process-global lease. Parent and exact-child cancellation are latched before
+backend registration, target loss remains child-local, and runtime status
+reports the eight active resource categories used by the reliability gate.
+UIA, macOS AX, Remote Worker, isolated desktop, Electron webContents, and frame
+targets remain outside this layer.
