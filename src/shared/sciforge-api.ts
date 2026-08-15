@@ -408,54 +408,6 @@ export type ModelAccessStatus = {
   traceCaptureReady: boolean
   action: string
 }
-export type ComputerUsePermissionKind = 'accessibility' | 'screenRecording'
-export type ComputerUsePermissionState = 'granted' | 'denied' | 'unknown'
-export type ComputerUsePermissions = {
-  platform: string
-  supported: boolean
-  needsPermission: boolean
-  accessibility: ComputerUsePermissionState
-  screenRecording: ComputerUsePermissionState
-  accessibilityNeedsRestart: boolean
-}
-export type ComputerUseLeaseView = {
-  leaseId: string
-  computerUseSessionId: string
-  agentId: string
-  threadId: string
-  turnId?: string
-  targetId: string
-  backend: string
-  acquiredAt: string
-  updatedAt: string
-}
-export type ComputerUseRejectionView = {
-  code: string
-  message: string
-  targetId?: string
-  activeLease?: ComputerUseLeaseView
-}
-export type ComputerUseBackendStatusView = {
-  backend: string
-  available: boolean
-  platform: string
-  reason?: string
-  activeLeases: ComputerUseLeaseView[]
-  recentRejections: ComputerUseRejectionView[]
-  recentError?: string
-}
-export type ComputerUseRuntimeStatusView = {
-  updatedAt: string
-  servers: Array<ComputerUseBackendStatusView & { serverId: string; pid: number; updatedAt: string }>
-  activeLeases: ComputerUseLeaseView[]
-  recentRejections: ComputerUseRejectionView[]
-  backend: ComputerUseBackendStatusView | null
-}
-export type ComputerUseStatusView = {
-  settings?: ComputerUseSettingsV1
-  permissions: ComputerUsePermissions
-  runtime: ComputerUseRuntimeStatusView
-}
 export type ConnectPhoneInstallQrResult =
   | { ok: true; url: string; deviceCode: string; userCode: string; interval: number; expireIn: number }
   | { ok: false; message: string }
@@ -1035,11 +987,6 @@ export type SciForgeApi = {
   runDesktopCommand: (command: DesktopCommand) => Promise<void>
   getPerformanceSnapshot: () => Promise<PerformanceSnapshotResult>
   openExternal: (url: string) => Promise<void>
-  getComputerUsePermissions: () => Promise<ComputerUsePermissions>
-  requestComputerUsePermission: (
-    kind: ComputerUsePermissionKind
-  ) => Promise<ComputerUsePermissions>
-  getComputerUseStatus: () => Promise<ComputerUseStatusView>
   showTurnCompleteNotification: (
     payload: TurnCompleteNotificationPayload
   ) => Promise<SystemNotificationResult>

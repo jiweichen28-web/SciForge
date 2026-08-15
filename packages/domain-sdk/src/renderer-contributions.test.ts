@@ -8,6 +8,7 @@ import {
   RENDERER_COMPOSER_CONTEXT_PROVIDER_CONTRIBUTION_KIND,
   RENDERER_EXTENSION_CONTRIBUTION_KIND,
   RENDERER_RESOURCE_NAVIGATION_CONTRIBUTION_KIND,
+  RENDERER_SETTINGS_SECTION_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_BOTTOM_PANEL_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_GLOBAL_OVERLAY_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_RIGHT_PANEL_CONTRIBUTION_KIND,
@@ -26,6 +27,7 @@ import {
   isDomainRendererCommandHandler,
   isDomainRendererComposerContextProvider,
   isDomainRendererResourceNavigationValue,
+  isDomainRendererSettingsSectionValue,
   isDomainRendererWorkbenchSurfaceValue,
   isDomainRendererWorkbenchToolbarActionValue,
   type DomainRendererCommandHandler,
@@ -60,6 +62,20 @@ describe('renderer extension contribution contracts', () => {
       'renderer.resource-navigation'
     )
     assert.equal(RENDERER_EXTENSION_CONTRIBUTION_KIND, 'renderer.extension')
+    assert.equal(RENDERER_SETTINGS_SECTION_CONTRIBUTION_KIND, 'renderer.settings-section')
+  })
+
+  it('validates one exact generic settings-section value', () => {
+    assert.equal(isDomainRendererSettingsSectionValue({
+      section: 'agents.permissions',
+      order: 10,
+      render: () => null
+    }), true)
+    assert.equal(isDomainRendererSettingsSectionValue({
+      section: 'agents.permissions',
+      render: () => null,
+      hostPrivate: true
+    }), false)
   })
 
   it('accepts bounded generic command activation and rejects unknown or non-JSON payloads', () => {

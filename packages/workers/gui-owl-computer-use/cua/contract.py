@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from . import result as R
+from .isolation import parse_requested_isolation
 
 TOOL_RUN = "gui_computer_use_run"
 TOOL_CANCEL = "gui_computer_use_cancel"
@@ -62,10 +63,55 @@ RUN_INPUT_SCHEMA: Dict[str, Any] = {
             "description": "Optional stable id; pass the same id to "
             "gui_computer_use_cancel to stop this run.",
         },
+        "requestedIsolation": {
+            "type": "string",
+            "enum": ["auto", "host-approved", "host-app-scoped", "agent-isolated"],
+            "default": "auto",
+            "description": "Internal sidecar routing requirement. Legacy host input only "
+            "satisfies auto or host-approved.",
+        },
+        "invocation": {
+            "type": "object",
+            "description": "Trusted Host invocation identity forwarded by the domain MCP.",
+        },
     },
     "required": ["instruction"],
     "additionalProperties": False,
 }
+
+
+def normalize_run_input(value: object) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("run input must be an object")
+    unknown = set(value) - set(RUN_INPUT_SCHEMA["properties"])
+    if unknown:
+        raise ValueError(f"unsupported fields: {', '.join(sorted(unknown))}")
+    instruction = value.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise ValueError("instruction is required")
+    if len(instruction) > 16_384:
+        raise ValueError("instruction must be at most 16384 characters")
+    normalized: Dict[str, Any] = {"instruction": instruction.strip()}
+    for field in ("execute", "approve"):
+        raw = value.get(field, False)
+        if not isinstance(raw, bool):
+            raise ValueError(f"{field} must be a boolean")
+        normalized[field] = raw
+    for field in ("imagePath", "imageBase64", "requestId"):
+        raw = value.get(field)
+        if raw is not None:
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError(f"{field} must be a non-empty string")
+            normalized[field] = raw.strip()
+    normalized["requestedIsolation"] = parse_requested_isolation(
+        value.get("requestedIsolation")
+    ).value
+    invocation = value.get("invocation")
+    if invocation is not None:
+        if not isinstance(invocation, dict):
+            raise ValueError("invocation must be an object")
+        normalized["invocation"] = dict(invocation)
+    return normalized
 
 CANCEL_INPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",

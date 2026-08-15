@@ -266,22 +266,17 @@ describe('createCodexAgentRuntimeAdapter', () => {
     })
   })
 
-  it('reports shared computer-use MCP capability for Codex', async () => {
+  it('reports domain-owned tools only through the generic Codex MCP capability', async () => {
     const adapter = createCodexAgentRuntimeAdapter({
       isMcpConfigured: () => true,
-      isResearchMcpConfigured: () => false,
-      isComputerUseMcpConfigured: () => true
+      isResearchMcpConfigured: () => false
     } as never)
 
     const caps = await adapter.capabilities({ settings: {} as never })
-    expect(caps.tools.mcp).toMatchObject({
-      available: true,
-      toolCount: 1
-    })
+    expect(caps.tools.mcp).toMatchObject({ available: true })
     expect(caps.tools.computerUse).toMatchObject({
-      available: true,
-      server: 'mcp',
-      toolName: 'computer_use'
+      available: false,
+      reason: 'Domain-owned tools are exposed through the generic MCP capability.'
     })
     expect(caps.tools.research).toMatchObject({
       available: false
@@ -290,21 +285,13 @@ describe('createCodexAgentRuntimeAdapter', () => {
     await expect(adapter.auxiliary!({ settings: {} as never }, {
       runtimeId: 'codex',
       operation: 'getToolDiagnostics'
-    })).resolves.toMatchObject({
-      mcpServers: [{
-        id: 'gui_owl_computer_use',
-        status: 'configured',
-        toolCount: 1,
-        tools: ['computer_use']
-      }]
-    })
+    })).resolves.toMatchObject({ mcpServers: [] })
   })
 
   it('surfaces bounded path-safe dynamic MCP unavailable-tool lifecycle diagnostics', async () => {
     const adapter = createCodexAgentRuntimeAdapter({
       isMcpConfigured: () => true,
       isResearchMcpConfigured: () => false,
-      isComputerUseMcpConfigured: () => false,
       dynamicMcpToolDiagnostics: () => [{
         at: '2026-07-12T00:00:00.000Z',
         event: 'tool_unavailable',

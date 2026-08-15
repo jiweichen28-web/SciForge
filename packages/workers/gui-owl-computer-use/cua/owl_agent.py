@@ -13,8 +13,8 @@ Coordinates are in a 1000x1000 normalized space (the system prompt tells the
 model "the screen's resolution is 1000x1000"); we map them to real screen pixels.
 
 This module only talks to the grounding model API and parses its output.
-Execution (mapping a parsed action to mouse/keyboard) lives in the runner via
-DesktopExecutor.
+Execution is delegated by the runner through its request-owned input channel;
+only the selected backend may touch mouse or keyboard state.
 """
 from __future__ import annotations
 
@@ -217,7 +217,6 @@ def call_owl(base_url: str, model: str, api_key: str,
         "model": model,
         "input": input_items,
         "max_output_tokens": max_tokens,
-        "temperature": 0.0,
         "stream": False,
     }
     if instructions:

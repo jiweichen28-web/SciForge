@@ -4,6 +4,7 @@ import {
   RENDERER_CHAT_RESULT_PANEL_CONTRIBUTION_KIND,
   RENDERER_RESOURCE_NAVIGATION_CONTRIBUTION_KIND,
   RENDERER_COMPOSER_CONTEXT_PROVIDER_CONTRIBUTION_KIND,
+  RENDERER_SETTINGS_SECTION_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_BOTTOM_PANEL_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_GLOBAL_OVERLAY_CONTRIBUTION_KIND,
   RENDERER_WORKBENCH_RIGHT_PANEL_CONTRIBUTION_KIND,
@@ -135,6 +136,16 @@ describe('installed renderer contributions', () => {
         }
       }
     })
+    const expectedSettingsSections = installedRendererDomainEntrySet.contributions
+      .filter(({ declaration }) =>
+        declaration.kind === RENDERER_SETTINGS_SECTION_CONTRIBUTION_KIND
+      )
+      .map(({ declaration, owner }) => ({
+        id: declaration.id,
+        ownerId: owner.moduleId
+      }))
+    expect(runtime.settingsSections.map(({ id, ownerId }) => ({ id, ownerId })))
+      .toEqual(expectedSettingsSections)
     const expectedCommands = installedRendererDomainEntrySet.contributions
       .filter(({ declaration }) =>
         declaration.kind === RENDERER_COMMAND_CONTRIBUTION_KIND

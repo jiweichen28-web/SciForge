@@ -82,9 +82,9 @@ describe('createClaudeCodeAgentRuntimeAdapter', () => {
     expect(received).toEqual([input])
   })
 
-  it('reports shared computer-use MCP capability for Claude Code', async () => {
+  it('reports domain-owned tools only through the generic Claude MCP capability', async () => {
     const adapter = createClaudeCodeAgentRuntimeAdapter({
-      isComputerUseMcpConfigured: () => true,
+      isMcpConfigured: () => true,
       runtimeInfo: async () => ({
         command: 'claude',
         model: 'sciforge-router'
@@ -97,31 +97,20 @@ describe('createClaudeCodeAgentRuntimeAdapter', () => {
       tools: {
         mcp: { available: true },
         computerUse: {
-          available: true,
-          server: 'mcp',
-          toolName: 'computer_use'
+          available: false,
+          reason: 'Domain-owned tools are exposed through the generic MCP capability.'
         }
       }
     })
     await expect(adapter.auxiliary?.(ctx, {
       operation: 'getToolDiagnostics'
-    })).resolves.toMatchObject({
-      mcpServers: [{
-        id: 'gui_owl_computer_use',
-        status: 'configured',
-        toolCount: 1,
-        tools: ['computer_use']
-      }]
-    })
+    })).resolves.toMatchObject({ mcpServers: [] })
     await expect(adapter.auxiliary?.(ctx, {
       operation: 'getRuntimeInfo'
     })).resolves.toMatchObject({
       capabilities: {
         mcp: {
-          computerUse: {
-            enabled: true,
-            available: true
-          }
+          configuredServers: 1
         }
       }
     })

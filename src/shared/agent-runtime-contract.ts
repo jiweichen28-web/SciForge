@@ -1501,7 +1501,7 @@ export type AgentRuntimeCapabilities = {
     }
     computerUse: CapabilityState & {
       server?: 'mcp'
-      toolName?: 'computer_use'
+      toolName?: string
       backend?: 'browser-cdp' | 'gui-owl'
       inputIsolation?: 'agent-isolated' | 'host-approved'
       affectsUserInput?: boolean

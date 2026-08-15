@@ -43,9 +43,6 @@ import {
   resolveClaudeWorkspace
 } from './claude-code-config'
 import {
-  isComputerUseMcpConfigured,
-} from '../../computer-use-mcp-config'
-import {
   filterAgentRuntimeToolSurface,
   nativeAgentToolExecutionMetadata,
   type AgentRuntimeToolSurface
@@ -268,8 +265,8 @@ export class ClaudeCodeRuntimeService {
     this.sessionStore = new ClaudeCodeSessionStore({ rootDir: options.storageRoot })
   }
 
-  isComputerUseMcpConfigured(settings?: AppSettingsV1): boolean {
-    return isComputerUseMcpConfigured(settings, 'claude')
+  isMcpConfigured(): boolean {
+    return Boolean(this.options.agentTools)
   }
 
   async connect(): Promise<ClaudeCodeConnectResult> {

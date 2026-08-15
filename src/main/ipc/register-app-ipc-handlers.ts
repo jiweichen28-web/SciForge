@@ -71,7 +71,6 @@ import {
   agentRuntimeUserInputResolvePayloadSchema,
   connectPhoneInstallPollPayloadSchema,
   connectPhoneInstallQrPayloadSchema,
-  computerUsePermissionKindSchema,
   remoteChannelActiveThreadContextPayloadSchema,
   remoteChannelMirrorPayloadSchema,
   remoteChannelTaskFromTextPayloadSchema,
@@ -224,11 +223,6 @@ import {
 } from '../services/write-inline-completion-service'
 import { retrieveWriteContext } from '../services/write-retrieval-service'
 import { requestSpeechTranscription } from '../services/speech-to-text-service'
-import {
-  getComputerUsePermissions,
-  requestComputerUsePermission
-} from '../services/computer-use-permissions'
-import { readComputerUseRuntimeStatus } from '../services/computer-use-status'
 import { exportWriteDocument } from '../services/write-export-service'
 import { listGuiSkills } from '../services/skill-service'
 type GuiUpdaterModule = typeof import('../gui-updater')
@@ -728,25 +722,6 @@ export function registerAppIpcHandlers(options: RegisterAppIpcHandlersOptions): 
       parseIpcPayload('settings:set', settingsPatchSchema, partial) as AppSettingsPatch
     )
   )
-  handleInvoke('computer-use:permissions', async () => getComputerUsePermissions())
-  handleInvoke('computer-use:request-permission', async (_, kind: unknown) =>
-    requestComputerUsePermission(
-      parseIpcPayload(
-        'computer-use:request-permission',
-        computerUsePermissionKindSchema,
-        kind
-      )
-    )
-  )
-  handleInvoke('computer-use:status', async () => {
-    const settings = await store.load()
-    const statusPath = join(app.getPath('userData'), 'computer-use', 'status.json')
-    return {
-      settings: settings.computerUse,
-      permissions: await getComputerUsePermissions(),
-      runtime: await readComputerUseRuntimeStatus(statusPath)
-    }
-  })
   handleInvoke('performance:snapshot', async () => {
     const mainSnapshot = getMainPerformanceSnapshot?.() ?? null
     const win = getMainWindow()

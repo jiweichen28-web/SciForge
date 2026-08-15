@@ -5,7 +5,9 @@ import {
   defineDomainMainSystemCapabilityGrant,
   domainMainRuntimeLifecycleContractSchema,
   isDomainArtifactConsumer,
+  isDomainMcpTrustedInvocationMetadataContribution,
   isDomainMainActionGuard,
+  isDomainMainRuntimeMcpServerContribution,
   isDomainMainRuntimeLifecycleContribution,
   type DomainMainAfterTurnEvent,
   type DomainMainBeforeTurnEvent,
@@ -52,6 +54,29 @@ describe('domain host contracts', () => {
         'artifact-versions.identities.select'
       ]
     }))
+  })
+
+  it('validates generic runtime MCP and trusted metadata contributions', () => {
+    assert.equal(isDomainMainRuntimeMcpServerContribution({
+      serverId: 'domain-worker',
+      createConfig: () => null
+    }), true)
+    assert.equal(isDomainMainRuntimeMcpServerContribution({
+      serverId: '',
+      createConfig: () => null
+    }), false)
+    assert.equal(isDomainMcpTrustedInvocationMetadataContribution({
+      serverId: 'domain-worker',
+      tools: ['domain_tool'],
+      metadataKey: 'io.example/trusted',
+      source: 'trusted-invocation'
+    }), true)
+    assert.equal(isDomainMcpTrustedInvocationMetadataContribution({
+      serverId: 'domain-worker',
+      tools: ['domain_tool', 'domain_tool'],
+      metadataKey: 'io.example/trusted',
+      source: 'trusted-invocation'
+    }), false)
   })
 
   it('derives one stable synthetic DAG scope for threadless executions', () => {
