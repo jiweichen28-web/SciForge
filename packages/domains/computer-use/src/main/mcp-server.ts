@@ -58,6 +58,7 @@ export function createComputerUseMcpServer(
   server.registerTool(COMPUTER_USE_MCP_TOOL_NAME, {
     description: [
       'Control the user\'s real desktop through the host-approved GUI-Owl worker.',
+      'Backend: Legacy/PyAutoGUI. Isolation: host-approved. Lease: process-global.',
       'Provide one natural-language instruction. Host input is process-global and cannot overlap.',
       'Returns a ServiceResult trace; the caller must verify task completion.'
     ].join(' '),

@@ -34,6 +34,27 @@ describe('domain-owned Computer Use MCP server', () => {
     }
   })
 
+  it('discloses the legacy backend and isolation boundary in the managed tool catalog', async () => {
+    const server = createComputerUseMcpServer({
+      serviceUrl: 'http://127.0.0.1:3900',
+      serviceToken: 'sidecar-token',
+      timeoutMs: 5_000
+    })
+    const client = new Client({ name: 'test', version: '0.1.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+      const catalog = await client.listTools()
+      const tool = catalog.tools.find(({ name }) => name === COMPUTER_USE_MCP_TOOL_NAME)
+      expect(tool?.description).toContain('Backend: Legacy/PyAutoGUI.')
+      expect(tool?.description).toContain('Isolation: host-approved.')
+      expect(tool?.description).toContain('Lease: process-global.')
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
   it('requires trusted confirmation before forwarding an instruction-equivalent v1 call', async () => {
     const requests: Record<string, unknown>[] = []
     const sidecar = await startFakeSidecar(async (request, response) => {
