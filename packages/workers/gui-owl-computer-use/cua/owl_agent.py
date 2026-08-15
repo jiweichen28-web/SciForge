@@ -29,6 +29,10 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from PIL import Image
 
+
+class ModelCallError(RuntimeError):
+    """Sanitized Model Router failure safe to expose in local diagnostics."""
+
 # --- system prompt (verbatim from the official computer_use action space) -----
 SYSTEM_PROMPT = (
     "# Tools\n\n"
@@ -235,7 +239,23 @@ def call_owl(base_url: str, model: str, api_key: str,
         }]
         body["tool_choice"] = {"type": "function", "name": "computer_use"}
     r = requests.post(url, headers=headers, json=body, timeout=timeout)
-    r.raise_for_status()
+    try:
+        r.raise_for_status()
+    except requests.HTTPError:
+        status = int(getattr(r, "status_code", 500) or 500)
+        code = "upstream_error"
+        message = "Model Router request failed."
+        try:
+            payload = r.json()
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict):
+                code = str(error.get("code") or code)[:128]
+                message = str(error.get("message") or message)[:2_000]
+        except (TypeError, ValueError):
+            pass
+        raise ModelCallError(
+            f"Model Router HTTP {status} ({code}): {message}"
+        ) from None
     return _responses_output_text(r.json())
 
 

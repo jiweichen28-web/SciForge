@@ -175,6 +175,46 @@ def test_model_router_responses_call_optional():
     assert "input_image" in serialized and "data:image/png;base64,AAAA" in serialized
 
 
+def test_model_router_exposes_sanitized_bridge_error_optional():
+    try:
+        from cua import owl_agent
+    except Exception:  # noqa: BLE001
+        return
+
+    original_post = owl_agent.requests.post
+
+    class FakeResponse:
+        status_code = 502
+
+        def raise_for_status(self):
+            raise owl_agent.requests.HTTPError("raw URL must not escape")
+
+        def json(self):
+            return {
+                "error": {
+                    "code": "computer_use_planner_unavailable",
+                    "message": "Agent execution failed.",
+                }
+            }
+
+    try:
+        owl_agent.requests.post = lambda *args, **kwargs: FakeResponse()
+        try:
+            owl_agent.call_owl(
+                "http://127.0.0.1:3892/v1",
+                "sciforge-router",
+                "router-token",
+                [{"role": "user", "content": "inspect"}],
+            )
+            raise AssertionError("expected ModelCallError")
+        except owl_agent.ModelCallError as error:
+            assert "HTTP 502" in str(error)
+            assert "Agent execution failed." in str(error)
+            assert "raw URL" not in str(error)
+    finally:
+        owl_agent.requests.post = original_post
+
+
 def test_model_router_responses_url_normalizes_base_optional():
     try:
         from cua import owl_agent

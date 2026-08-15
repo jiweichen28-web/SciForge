@@ -258,7 +258,10 @@ def test_invalid_planner_response_fails_before_backend_dispatch_and_releases_req
     )
 
     def reject_planner(*_args, **_kwargs):
-        raise RuntimeError("forced-function arguments are invalid")
+        raise owl_agent.ModelCallError(
+            "Model Router HTTP 502 (computer_use_planner_unavailable): "
+            "forced-function arguments are invalid"
+        )
 
     monkeypatch.setattr(owl_agent, "call_owl", reject_planner)
     result = runtime.run({
@@ -273,6 +276,7 @@ def test_invalid_planner_response_fails_before_backend_dispatch_and_releases_req
     assert result["ok"] is False
     assert result["error"]["code"] == "BACKEND_UNAVAILABLE"
     assert "before action dispatch" in result["error"]["message"]
+    assert "forced-function arguments are invalid" in result["error"]["details"]["plannerErrorMessage"]
     assert backend.performed == []
     assert runtime.status()["requests"] == 0
     assert runtime.status()["sessions"] == 1

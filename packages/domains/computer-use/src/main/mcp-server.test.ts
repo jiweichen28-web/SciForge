@@ -116,10 +116,13 @@ describe('domain-owned Computer Use MCP server', () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     try {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
-      expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
+      const tools = (await client.listTools()).tools
+      expect(tools.map((tool) => tool.name).sort()).toEqual([
         'computer_use', 'computer_use_bind_target', 'computer_use_get_capabilities',
         'computer_use_list_targets', 'computer_use_release_session'
       ])
+      expect(tools.find((tool) => tool.name === COMPUTER_USE_RELEASE_SESSION_TOOL_NAME)?.annotations)
+        .toMatchObject({ readOnlyHint: false, idempotentHint: true, openWorldHint: true })
       const denied = await client.callTool({
         name: COMPUTER_USE_BIND_TARGET_TOOL_NAME,
         arguments: { targetId: 'cdp:page-1' }

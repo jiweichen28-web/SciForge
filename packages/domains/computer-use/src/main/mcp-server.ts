@@ -95,7 +95,7 @@ export function createComputerUseMcpServer(
   server.registerTool(COMPUTER_USE_RELEASE_SESSION_TOOL_NAME, {
     description: 'Release a bound target session and its adapter handle.',
     inputSchema: computerUseReleaseSessionInputSchema,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async (args, extra) => mutation(config, '/computer-use/sessions/release', args, extra._meta, extra.signal))
   return server
 }

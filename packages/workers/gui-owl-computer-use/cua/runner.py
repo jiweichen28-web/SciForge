@@ -105,10 +105,13 @@ def _run_loop(
                 canonical_observation=channel.canonical_observation(),
             )
         except Exception as error:  # noqa: BLE001
+            details = {"step": index, "plannerError": type(error).__name__}
+            if isinstance(error, owl_agent.ModelCallError):
+                details["plannerErrorMessage"] = str(error)
             return R.err(
                 "BACKEND_UNAVAILABLE",
                 "Computer Use planner failed before action dispatch.",
-                details={"step": index, "plannerError": type(error).__name__},
+                details=details,
                 prov=R.provenance("computer_use_run", channel.request_id, started),
             )
         if channel.cancelled:
