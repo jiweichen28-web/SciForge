@@ -4,7 +4,7 @@
 
 Authoritative source: `src/main/modules/index.ts`
 
-Registered actions: **195**
+Registered actions: **197**
 
 | Action ID | Version | Audiences | Effect | Approval | Scope |
 | --- | --- | --- | --- | --- | --- |
@@ -57,6 +57,8 @@ Registered actions: **195**
 | `browser-preview.reload` | 1.0.0 | ui, agent | external-write | confirmation | resource |
 | `browser-preview.select` | 1.0.0 | ui, agent | external-write | confirmation | resource |
 | `change-inspector.open-session` | 1.0.0 | ui | read | none | workspace |
+| `computer-use.request-permission` | 1.0.0 | ui | external-write | confirmation | global |
+| `computer-use.status` | 1.0.0 | ui | read | none | global |
 | `controlled-process.create` | 1.0.0 | ui | external-write | none | workspace |
 | `controlled-process.dispose` | 1.0.0 | ui | external-write | none | resource |
 | `controlled-process.read` | 1.0.0 | ui | read | none | resource |
@@ -16597,6 +16599,331 @@ Issues a read-only resource for one session change snapshot.
     "audit"
   ],
   "title": "Observe session changes"
+}
+```
+
+## `computer-use.request-permission`
+
+Opens the operating system permission enrollment flow.
+
+- Version: `1.0.0`
+- Audiences: ui
+- Effect: `external-write`
+- Approval: confirmation
+- Scope: global
+
+### Contract
+
+```json
+{
+  "concurrency": {
+    "idempotency": "required",
+    "revision": "none"
+  },
+  "contractVersion": 1,
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "additionalProperties": false,
+    "properties": {
+      "kind": {
+        "enum": [
+          "accessibility",
+          "screenRecording"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind"
+    ],
+    "type": "object"
+  },
+  "outputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "additionalProperties": false,
+    "properties": {
+      "accessibility": {
+        "enum": [
+          "granted",
+          "denied",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "accessibilityNeedsRestart": {
+        "type": "boolean"
+      },
+      "needsPermission": {
+        "type": "boolean"
+      },
+      "platform": {
+        "type": "string"
+      },
+      "screenRecording": {
+        "enum": [
+          "granted",
+          "denied",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "supported": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "platform",
+      "supported",
+      "needsPermission",
+      "accessibility",
+      "screenRecording",
+      "accessibilityNeedsRestart"
+    ],
+    "type": "object"
+  },
+  "resourceKinds": [],
+  "tags": [
+    "computer-use"
+  ],
+  "title": "Request Computer Use permission"
+}
+```
+
+## `computer-use.status`
+
+Reads domain-owned permissions and Computer Use lifecycle status.
+
+- Version: `1.0.0`
+- Audiences: ui
+- Effect: `read`
+- Approval: none
+- Scope: global
+
+### Contract
+
+```json
+{
+  "concurrency": {
+    "idempotency": "none",
+    "revision": "none"
+  },
+  "contractVersion": 1,
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "additionalProperties": false,
+    "properties": {
+      "settings": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "runtimeEnabled": {
+            "additionalProperties": false,
+            "properties": {
+              "claude": {
+                "type": "boolean"
+              },
+              "codex": {
+                "type": "boolean"
+              },
+              "sciforge": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "sciforge",
+              "codex",
+              "claude"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "enabled",
+          "runtimeEnabled"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "settings"
+    ],
+    "type": "object"
+  },
+  "outputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "additionalProperties": false,
+    "properties": {
+      "permissions": {
+        "additionalProperties": false,
+        "properties": {
+          "accessibility": {
+            "enum": [
+              "granted",
+              "denied",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "accessibilityNeedsRestart": {
+            "type": "boolean"
+          },
+          "needsPermission": {
+            "type": "boolean"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "screenRecording": {
+            "enum": [
+              "granted",
+              "denied",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "supported": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "platform",
+          "supported",
+          "needsPermission",
+          "accessibility",
+          "screenRecording",
+          "accessibilityNeedsRestart"
+        ],
+        "type": "object"
+      },
+      "runtime": {
+        "additionalProperties": false,
+        "properties": {
+          "activeChannels": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "activeLeases": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "backend": {
+            "enum": [
+              "legacy-pyautogui",
+              "browser-cdp"
+            ],
+            "type": "string"
+          },
+          "cleanupPending": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "effectiveIsolation": {
+            "enum": [
+              "host-approved",
+              "host-app-scoped"
+            ],
+            "type": "string"
+          },
+          "leaseScope": {
+            "enum": [
+              "process-global",
+              "target"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requests": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sessions": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "configured",
+          "available",
+          "backend",
+          "effectiveIsolation",
+          "leaseScope",
+          "activeChannels",
+          "cleanupPending",
+          "sessions",
+          "requests",
+          "activeLeases",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "settings": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "runtimeEnabled": {
+            "additionalProperties": false,
+            "properties": {
+              "claude": {
+                "type": "boolean"
+              },
+              "codex": {
+                "type": "boolean"
+              },
+              "sciforge": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "sciforge",
+              "codex",
+              "claude"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "enabled",
+          "runtimeEnabled"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "settings",
+      "permissions",
+      "runtime"
+    ],
+    "type": "object"
+  },
+  "resourceKinds": [],
+  "tags": [
+    "computer-use"
+  ],
+  "title": "Read Computer Use status"
 }
 ```
 
@@ -82470,6 +82797,7 @@ Releases an open Workspace Preview session.
 | Biology Room | biologyRoom: |  |
 | Browser Preview | browserPreview: |  |
 | Change Inspector |  |  |
+| Computer Use |  |  |
 | Controlled Process |  |  |
 | Create Loop |  |  |
 | Dataset API |  |  |
