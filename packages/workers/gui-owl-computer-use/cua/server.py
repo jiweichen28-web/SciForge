@@ -23,6 +23,7 @@ import io
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
+from urllib.parse import urlparse
 
 from PIL import Image
 
@@ -103,19 +104,67 @@ class Handler(BaseHTTPRequestHandler):
             if auth_error:
                 return self._send(401, auth_error)
             return self._send(200, {"ok": True, "data": SERVICE.status()})
+        if self.path == "/computer-use/capabilities":
+            auth_error = _check_auth(self.headers.get("Authorization"))
+            if auth_error:
+                return self._send(401, auth_error)
+            return self._send(200, {"ok": True, "data": SERVICE.capabilities()})
+        if self.path == "/computer-use/targets":
+            auth_error = _check_auth(self.headers.get("Authorization"))
+            if auth_error:
+                return self._send(401, auth_error)
+            result = SERVICE.targets()
+            return self._send(200 if result.get("ok") else 503, result)
         return self._send(404, R.err("NOT_FOUND", f"no route {self.path}"))
 
     def do_POST(self):
-        if self.path not in ("/computer-use/run", "/computer-use/cancel"):
+        if self.path not in (
+            "/computer-use/run", "/computer-use/cancel",
+            "/computer-use/sessions/bind", "/computer-use/sessions/release",
+            "/computer-use/backends/cdp/configure",
+            "/computer-use/model-access/configure",
+        ):
             return self._send(404, R.err("NOT_FOUND", f"no route {self.path}"))
         auth_error = _check_auth(self.headers.get("Authorization"))
         if auth_error:
             return self._send(401, auth_error)
         try:
             n = int(self.headers.get("Content-Length", 0))
+            if n < 0 or n > 1_000_000:
+                return self._send(413, R.err("INVALID_ARGUMENT", "request body exceeds 1 MB"))
             body = json.loads(self.rfile.read(n) or b"{}")
         except Exception as e:  # noqa: BLE001
             return self._send(400, R.err("INVALID_ARGUMENT", f"bad json: {e}"))
+        if self.path == "/computer-use/backends/cdp/configure":
+            if not CONFIG.service_token:
+                return self._send(403, R.err("UNAUTHENTICATED", "adapter configuration requires sidecar auth"))
+            result = SERVICE.configure_cdp_adapter(
+                str(body.get("adapterUrl") or "").strip(),
+                str(body.get("adapterToken") or "").strip(),
+                expected_adapter_url=str(body.get("expectedAdapterUrl") or "").strip(),
+            )
+            return self._send(200 if result.get("ok") else 409, result)
+        if self.path == "/computer-use/model-access/configure":
+            if not CONFIG.service_token:
+                return self._send(403, R.err("UNAUTHENTICATED", "model access configuration requires sidecar auth"))
+            base_url = str(body.get("baseUrl") or "").strip().rstrip("/")
+            if base_url:
+                parsed = urlparse(base_url)
+                if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+                    return self._send(400, R.err("INVALID_ARGUMENT", "model bridge must use loopback HTTP"))
+            result = SERVICE.configure_model_access(
+                base_url,
+                str(body.get("apiKey") or "").strip(),
+                str(body.get("model") or "").strip(),
+                expected_base_url=str(body.get("expectedBaseUrl") or "").strip().rstrip("/"),
+            )
+            return self._send(200 if result.get("ok") else 409, result)
+        if self.path == "/computer-use/sessions/bind":
+            result = SERVICE.bind(body, settle_s=CONFIG.settle_s)
+            return self._send(200 if result.get("ok") else 400, result)
+        if self.path == "/computer-use/sessions/release":
+            result = SERVICE.release(body)
+            return self._send(200 if result.get("ok") else 400, result)
         # Cancel: flip the flag the in-flight run checks between steps so it stops
         # driving the desktop. Runs on a separate thread from the run loop.
         if self.path == "/computer-use/cancel":
@@ -127,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             def execute_channel(request, channel):
                 return run_task(
-                    CONFIG, request["instruction"], channel,
+                    SERVICE.planner_config(CONFIG, channel), request["instruction"], channel,
                     execute=request["execute"], approve=request["approve"],
                 )
 

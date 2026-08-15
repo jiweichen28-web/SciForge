@@ -63,6 +63,10 @@ RUN_INPUT_SCHEMA: Dict[str, Any] = {
             "description": "Optional stable id; pass the same id to "
             "gui_computer_use_cancel to stop this run.",
         },
+        "computerUseSessionId": {
+            "type": "string",
+            "description": "Bound target session. Omit for the strict v1 Legacy path.",
+        },
         "requestedIsolation": {
             "type": "string",
             "enum": ["auto", "host-approved", "host-app-scoped", "agent-isolated"],
@@ -97,15 +101,16 @@ def normalize_run_input(value: object) -> Dict[str, Any]:
         if not isinstance(raw, bool):
             raise ValueError(f"{field} must be a boolean")
         normalized[field] = raw
-    for field in ("imagePath", "imageBase64", "requestId"):
+    for field in ("imagePath", "imageBase64", "requestId", "computerUseSessionId"):
         raw = value.get(field)
         if raw is not None:
             if not isinstance(raw, str) or not raw.strip():
                 raise ValueError(f"{field} must be a non-empty string")
             normalized[field] = raw.strip()
-    normalized["requestedIsolation"] = parse_requested_isolation(
-        value.get("requestedIsolation")
-    ).value
+    requested = value.get("requestedIsolation")
+    if requested is None and normalized.get("computerUseSessionId"):
+        requested = "host-app-scoped"
+    normalized["requestedIsolation"] = parse_requested_isolation(requested).value
     invocation = value.get("invocation")
     if invocation is not None:
         if not isinstance(invocation, dict):

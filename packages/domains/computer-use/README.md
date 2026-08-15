@@ -1,14 +1,37 @@
 # Computer Use domain
 
-This package owns the Computer Use MCP binding and its public v1 compatibility
-contract. PR2 exposes only the existing `{ instruction }` tool and routes the
-GUI-Owl worker through a host-approved, process-global Legacy input channel.
-The package also owns its generic settings section, permission/status
-capabilities, MCP launch contribution, and trusted invocation metadata rule.
+This package owns the Computer Use MCP binding, its stable `{ instruction }`
+compatibility call, and the target-scoped CDP browser backend. It also owns the
+generic settings/status capabilities, MCP launch contribution, trusted
+invocation metadata rule, CDP adapter lifecycle, and Agent planner bridge.
 
-Live input requires a Host-confirmed invocation and one process-global lease.
-Success, failure, timeout, and cancellation close the request-owned channel;
-failed cleanup retains ownership and the next run must reclaim it before new
-ownership is granted. Requests for
-`host-app-scoped` or `agent-isolated` isolation fail closed. Target-scoped CDP
-support belongs to the next stacked layer and is not present here.
+The managed MCP exposes capability/target discovery, target bind, run, and
+release. Bind/run/release require Host-trusted approval metadata. A bound
+browser page gets a canonical ID and generation plus one target lease; every
+observation, action, navigation readback, and verification stays on that exact
+page. There is no CDP-to-PyAutoGUI fallback. The old `{ instruction }` call
+continues through the host-approved process-global Legacy channel.
+
+CDP actions do not require operating-system focus, inject host mouse/keyboard
+input, or use the host clipboard. Screenshot observation does activate the
+bound browser tab inside the explicitly allowlisted browser; capabilities
+report this separately as `activatesTargetForObservation=true`.
+
+The planner bridge calls the Host's active Agent runtime through
+`runEphemeral`, with no hard-coded Codex or Claude selection and no tools. It
+requires the bound target's bounded canonical semantic observation and uses
+Ajv to validate the declared forced-function schema and returned arguments
+before any backend action is dispatched.
+
+Set `SCIFORGE_CUA_CDP_ENDPOINTS` in the GUI process to a comma-separated
+allowlist of credential-free loopback CDP endpoints owned by the operator or
+the application. The domain starts an authenticated loopback adapter and
+registers it with the authenticated sidecar. Do not point it at a user browser
+profile. Startup, cancellation, release, and shutdown retain or reclaim
+ownership on cleanup failure; post-dispatch transport loss is reported as
+`ACTION_OUTCOME_UNKNOWN`, is never replayed, and permits only one bounded
+target-scoped readback.
+
+This layer supports attached Playwright `browser-page` targets. UIA, macOS AX,
+Remote Worker, isolated desktop, and concurrent multi-session orchestration are
+outside this package layer.

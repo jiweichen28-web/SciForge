@@ -1,11 +1,37 @@
 import { z } from 'zod'
 
-/** Stable external v1 MCP input. PR2 deliberately adds no target/session fields. */
+/** Stable compatibility input for callers that do not bind a target session. */
 export const computerUseV1InputSchema = z.object({
   instruction: z.string().trim().min(1).max(16_384)
 }).strict()
 
 export type ComputerUseV1Input = z.infer<typeof computerUseV1InputSchema>
+
+const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/)
+
+export const computerUseRunInputSchema = z.object({
+  instruction: z.string().trim().min(1).max(16_384),
+  computerUseSessionId: safeId.optional()
+}).strict()
+
+export const computerUseTargetSchema = z.object({
+  targetId: safeId,
+  kind: z.literal('browser-page'),
+  generation: safeId,
+  title: z.string().max(512),
+  url: z.string().max(4_096)
+}).strict()
+
+export const computerUseBindTargetInputSchema = z.object({
+  targetId: safeId,
+  requestedIsolation: z.literal('host-app-scoped').default('host-app-scoped')
+}).strict()
+
+export const computerUseReleaseSessionInputSchema = z.object({
+  computerUseSessionId: safeId
+}).strict()
+
+export const computerUseEmptyInputSchema = z.object({}).strict()
 
 export const computerUseSettingsSchema = z.object({
   enabled: z.boolean(),
@@ -28,9 +54,9 @@ export const computerUsePermissionsSchema = z.object({
 export const computerUseRuntimeStatusSchema = z.object({
   configured: z.boolean(),
   available: z.boolean(),
-  backend: z.literal('legacy-pyautogui'),
-  effectiveIsolation: z.literal('host-approved'),
-  leaseScope: z.literal('process-global'),
+  backend: z.enum(['legacy-pyautogui', 'browser-cdp']),
+  effectiveIsolation: z.enum(['host-approved', 'host-app-scoped']),
+  leaseScope: z.enum(['process-global', 'target']),
   activeChannels: z.number().int().nonnegative(),
   cleanupPending: z.number().int().nonnegative(),
   sessions: z.number().int().nonnegative(),

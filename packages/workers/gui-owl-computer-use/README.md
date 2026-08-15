@@ -1,21 +1,19 @@
 # @sciforge/gui-owl-computer-use
 
-Model-Router-backed **vision** computer-use worker: turn one natural-language
-task into real desktop actions (click / type / scroll / open apps) on the
-user's own **Windows / macOS / Linux** machine.
+Computer Use execution worker with a target-scoped CDP browser backend and a
+host-approved Legacy desktop compatibility backend.
 
-Computer-use is delegated through SciForge's app-owned Model Router. The routed
-vision and reasoning models read the screen, plan,
-grounds pixel coordinates, and decides when to stop. The main agent does not
-call provider APIs or plan the desktop steps; it hands the task to
-`computer_use`, and this worker sends model traffic only to the local Model
-Router responses endpoint.
+For a bound CDP page, the worker supplies its canonical semantic observation to
+the domain-owned planner bridge, which uses the Host's active Agent runtime in
+one-shot background mode. The Legacy compatibility path continues to use the
+app-owned Model Router for screenshot planning and grounding. Neither path
+accepts direct upstream provider credentials.
 
 ```
                 ┌──────────────────────────────────────────────┐
 task ──▶        │  observe → routed model plans+grounds+decides → act → …    │
-                │   model  → local SciForge Model Router                      │
-                │   act    → session/channel/router → Legacy backend   │
+                │   model  → active Host Agent runtime (CDP) or Model Router  │
+                │   act    → session/channel/router → CDP or Legacy backend   │
                 └──────────────────────────────────────────────┘
 ```
 
@@ -31,10 +29,10 @@ This worker is now the single computer-use path. The old
 `@sciforge/computer-use` GUI-managed primitive MCP server has been retired, and
 the Host no longer registers either retired server name.
 
-All runtimes expose the same `computer_use` tool through the GUI-managed
-`gui_owl_computer_use` MCP wrapper. That wrapper calls this HTTP sidecar.
-GUI-Owl owns the observe → plan → act loop, while Model Router owns all
-model/provider selection and policy.
+All runtimes expose the same domain-managed Computer Use tools through the
+`gui_owl_computer_use` MCP wrapper. That wrapper calls this HTTP sidecar. The
+Host selects the active Agent runtime for CDP planning; the compatibility path
+uses Model Router policy.
 
 ## Boundary (Servic_Module_Template.md / PROJECT_mcp.md)
 
@@ -47,8 +45,8 @@ model/provider selection and policy.
   the domain MCP supplied the matching Host-trusted confirmed invocation;
   otherwise it returns `NEEDS_APPROVAL`. Direct HTTP and worker-native MCP
   callers cannot mint this approval identity.
-- **HTTP sidecar auth**: `POST /computer-use/run` and
-  `POST /computer-use/cancel` accept an optional bearer token via
+- **HTTP sidecar auth**: all Computer Use status, discovery, lifecycle,
+  configuration, run, and cancel routes require the configured bearer token via
   `CUA_SERVICE_TOKEN`. The GUI launcher generates a random token per start and
   passes it to the GUI-managed MCP wrapper as `SCIFORGE_CUA_SERVICE_TOKEN`.
 - **Refs-first**: screenshots are written to disk and returned as artifact refs,
@@ -75,8 +73,9 @@ model/provider selection and policy.
 | Local entry (`--stdio` / `--http`) | `cua/cli.py` |
 | Target-bound input channel and fail-closed router | `driver/channel.py`, `driver/router.py` |
 | Host-approved compatibility backend | `driver/backends/legacy_pyautogui.py` |
+| Target-scoped browser backend | `driver/backends/cdp_adapter.py` |
 | Pure contract/result/parse tests | `tests/test_contract.py` |
-| Service/registry/router/channel lifecycle tests | `tests/test_service_lifecycle.py` |
+| Service/registry/router/channel lifecycle tests | `tests/test_service_lifecycle.py`, `tests/test_cdp_service_lifecycle.py` |
 | Development-only local model serve helper | `server/serve-gui-owl-32b.sh` |
 | One-click launcher: Model Router config + service + SciForge GUI | `一键启动-computer-use.bat`, `启动-sciforge-computer-use.ps1` |
 | Launcher secrets template (copy to `启动-secrets.local.ps1`) | `启动-secrets.example.ps1` |
@@ -84,10 +83,16 @@ model/provider selection and policy.
 Everything for the module lives in this one folder; see **Integration touchpoints**
 below for the few unavoidable edits elsewhere in the app.
 
-## MCP tools
+## Domain-managed MCP tools
 
-- `gui_computer_use_run` — `{ instruction, execute?, approve?, imagePath?, imageBase64?, requestId? }`
-- `gui_computer_use_cancel` — `{ requestId }`
+- `computer_use_get_capabilities`
+- `computer_use_list_targets`
+- `computer_use_bind_target` — acquires one target-scoped session/lease
+- `computer_use` — stable `{ instruction }`, with an optional domain-managed session
+- `computer_use_release_session`
+
+The worker-native stdio tools remain an internal compatibility/debug surface;
+the application uses the domain-managed wrapper and Host-trusted approvals.
 
 The full machine-readable `ServiceResult` is returned as a compact JSON text
 block alongside a one-line summary; screenshots stay as artifact refs.

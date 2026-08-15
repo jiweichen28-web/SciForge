@@ -15,9 +15,23 @@ export type ComputerUseMcpLaunchConfig = Readonly<{
 
 export const GUI_COMPUTER_USE_MCP_SERVER_NAME = 'gui_owl_computer_use'
 export const COMPUTER_USE_MCP_TOOL_NAME = 'computer_use'
+export const COMPUTER_USE_GET_CAPABILITIES_TOOL_NAME = 'computer_use_get_capabilities'
+export const COMPUTER_USE_LIST_TARGETS_TOOL_NAME = 'computer_use_list_targets'
+export const COMPUTER_USE_BIND_TARGET_TOOL_NAME = 'computer_use_bind_target'
+export const COMPUTER_USE_RELEASE_SESSION_TOOL_NAME = 'computer_use_release_session'
 const GUI_COMPUTER_USE_MCP_NODE_ENTRY = 'out/main/computer-use-mcp-node-entry.js'
 export const COMPUTER_USE_MCP_LAUNCH_FLAG = '--gui-owl-computer-use-mcp-server'
 export const COMPUTER_USE_MCP_TIMEOUT_MS = 600_000
+
+export function computerUseMcpEnabledTools(): string[] {
+  return [
+    COMPUTER_USE_GET_CAPABILITIES_TOOL_NAME,
+    COMPUTER_USE_LIST_TARGETS_TOOL_NAME,
+    COMPUTER_USE_BIND_TARGET_TOOL_NAME,
+    COMPUTER_USE_MCP_TOOL_NAME,
+    COMPUTER_USE_RELEASE_SESSION_TOOL_NAME
+  ]
+}
 
 export function isComputerUseMcpConfigured(
   settings: AppSettingsLike | undefined,

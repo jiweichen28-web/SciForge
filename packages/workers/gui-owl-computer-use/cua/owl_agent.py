@@ -29,6 +29,10 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from PIL import Image
 
+
+class ModelCallError(RuntimeError):
+    """Sanitized Model Router failure safe to expose in local diagnostics."""
+
 # --- system prompt (verbatim from the official computer_use action space) -----
 SYSTEM_PROMPT = (
     "# Tools\n\n"
@@ -205,7 +209,8 @@ def build_messages(instruction: str, history: List[Dict[str, str]],
 def call_owl(base_url: str, model: str, api_key: str,
              messages: List[Dict[str, Any]],
              timeout: float = 120.0,
-             max_tokens: int = 1024) -> str:
+             max_tokens: int = 1024,
+             canonical_observation: Dict[str, Any] | None = None) -> str:
     """POST to the app Model Router responses endpoint and return generated text."""
     url = _model_router_responses_url(base_url)
     headers = {"Content-Type": "application/json"}
@@ -221,8 +226,36 @@ def call_owl(base_url: str, model: str, api_key: str,
     }
     if instructions:
         body["instructions"] = instructions
+    if canonical_observation is not None:
+        body["metadata"] = {
+            "sciforge_observation_mode": "semantic",
+            "sciforge_semantic_observation": canonical_observation,
+        }
+        body["tools"] = [{
+            "type": "function",
+            "name": "computer_use",
+            "description": "Choose exactly one target-scoped browser action.",
+            "parameters": _cdp_action_schema(),
+        }]
+        body["tool_choice"] = {"type": "function", "name": "computer_use"}
     r = requests.post(url, headers=headers, json=body, timeout=timeout)
-    r.raise_for_status()
+    try:
+        r.raise_for_status()
+    except requests.HTTPError:
+        status = int(getattr(r, "status_code", 500) or 500)
+        code = "upstream_error"
+        message = "Model Router request failed."
+        try:
+            payload = r.json()
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict):
+                code = str(error.get("code") or code)[:128]
+                message = str(error.get("message") or message)[:2_000]
+        except (TypeError, ValueError):
+            pass
+        raise ModelCallError(
+            f"Model Router HTTP {status} ({code}): {message}"
+        ) from None
     return _responses_output_text(r.json())
 
 
@@ -317,16 +350,85 @@ def _content_to_text(content: Any) -> str:
 
 def _responses_output_text(payload: Dict[str, Any]) -> str:
     output_text = payload.get("output_text")
-    if isinstance(output_text, str):
+    if isinstance(output_text, str) and output_text:
         return output_text
     chunks: List[str] = []
     for item in payload.get("output", []) if isinstance(payload.get("output"), list) else []:
         if not isinstance(item, dict):
             continue
+        if item.get("type") == "function_call" and isinstance(item.get("arguments"), str):
+            try:
+                arguments = json.loads(item["arguments"])
+            except json.JSONDecodeError:
+                continue
+            return (
+                "Action: execute the validated target-scoped action\n<tool_call>" +
+                json.dumps({"name": item.get("name"), "arguments": arguments}) +
+                "</tool_call>"
+            )
         for part in item.get("content", []) if isinstance(item.get("content"), list) else []:
             if isinstance(part, dict) and isinstance(part.get("text"), str):
                 chunks.append(part["text"])
     return "\n".join(chunks)
+
+
+def _cdp_action_schema() -> Dict[str, Any]:
+    coordinate = {
+        "type": "array", "items": {"type": "number", "minimum": 0, "maximum": 1000},
+        "minItems": 2, "maxItems": 2,
+    }
+    click = {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": [
+                "click", "left_click", "right_click", "double_click",
+            ]},
+            "coordinate": coordinate,
+        },
+        "required": ["action", "coordinate"],
+        "additionalProperties": False,
+    }
+    return {
+        "oneOf": [
+            click,
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"const": "type"}, "text": {"type": "string", "maxLength": 16384},
+                },
+                "required": ["action", "text"], "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["key", "hotkey"]},
+                    "keys": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 8},
+                },
+                "required": ["action", "keys"], "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"action": {"const": "wait"}, "time": {"type": "number", "minimum": 0, "maximum": 30}},
+                "required": ["action", "time"], "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"const": "terminate"},
+                    "status": {"type": "string", "enum": ["success", "failure"]},
+                },
+                "required": ["action", "status"], "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["answer", "interact"]},
+                    "text": {"type": "string", "maxLength": 16384},
+                },
+                "required": ["action", "text"], "additionalProperties": False,
+            },
+        ]
+    }
 
 
 def extract_action(text: str) -> Optional[Dict[str, Any]]:

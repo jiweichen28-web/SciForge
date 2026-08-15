@@ -71,11 +71,30 @@ def test_owl_parsing_optional():
     assert owl_agent.to_screen([500, 250], 1000, 800) == (500, 200)
 
 
+def test_cdp_responses_function_call_and_schema_bounds_optional():
+    try:
+        from cua.owl_agent import _cdp_action_schema, _responses_output_text, extract_action
+    except Exception:  # noqa: BLE001
+        return
+    output = _responses_output_text({
+        "output_text": "",
+        "output": [{
+            "type": "function_call", "name": "computer_use",
+            "arguments": '{"action":"click","coordinate":[250,750]}',
+        }],
+    })
+    assert extract_action(output) == {"action": "click", "coordinate": [250, 750]}
+    coordinate = _cdp_action_schema()["oneOf"][0]["properties"]["coordinate"]
+    assert coordinate["minItems"] == coordinate["maxItems"] == 2
+    assert coordinate["items"]["minimum"] == 0
+    assert coordinate["items"]["maximum"] == 1000
+
+
 def test_build_messages_official_multiturn_optional():
     """Official GUI-Owl multi-turn: alternating roles, sliding 2-image window,
     task text retained in turn 0, older screenshots dropped. Skips if PIL absent."""
     try:
-        import io, tempfile, os as _os
+        import tempfile, os as _os
         from PIL import Image
         from cua import owl_agent
     except Exception:  # noqa: BLE001
@@ -154,6 +173,46 @@ def test_model_router_responses_call_optional():
     assert "temperature" not in calls[0]["json"]
     serialized = str(calls[0]["json"])
     assert "input_image" in serialized and "data:image/png;base64,AAAA" in serialized
+
+
+def test_model_router_exposes_sanitized_bridge_error_optional():
+    try:
+        from cua import owl_agent
+    except Exception:  # noqa: BLE001
+        return
+
+    original_post = owl_agent.requests.post
+
+    class FakeResponse:
+        status_code = 502
+
+        def raise_for_status(self):
+            raise owl_agent.requests.HTTPError("raw URL must not escape")
+
+        def json(self):
+            return {
+                "error": {
+                    "code": "computer_use_planner_unavailable",
+                    "message": "Agent execution failed.",
+                }
+            }
+
+    try:
+        owl_agent.requests.post = lambda *args, **kwargs: FakeResponse()
+        try:
+            owl_agent.call_owl(
+                "http://127.0.0.1:3892/v1",
+                "sciforge-router",
+                "router-token",
+                [{"role": "user", "content": "inspect"}],
+            )
+            raise AssertionError("expected ModelCallError")
+        except owl_agent.ModelCallError as error:
+            assert "HTTP 502" in str(error)
+            assert "Agent execution failed." in str(error)
+            assert "raw URL" not in str(error)
+    finally:
+        owl_agent.requests.post = original_post
 
 
 def test_model_router_responses_url_normalizes_base_optional():
