@@ -16691,7 +16691,7 @@ Opens the operating system permission enrollment flow.
 
 ## `computer-use.status`
 
-Reads domain-owned permissions and Legacy lifecycle status.
+Reads domain-owned permissions and Computer Use lifecycle status.
 
 - Version: `1.0.0`
 - Audiences: ui
@@ -16814,7 +16814,10 @@ Reads domain-owned permissions and Legacy lifecycle status.
             "type": "boolean"
           },
           "backend": {
-            "const": "legacy-pyautogui",
+            "enum": [
+              "legacy-pyautogui",
+              "browser-cdp"
+            ],
             "type": "string"
           },
           "cleanupPending": {
@@ -16826,11 +16829,17 @@ Reads domain-owned permissions and Legacy lifecycle status.
             "type": "boolean"
           },
           "effectiveIsolation": {
-            "const": "host-approved",
+            "enum": [
+              "host-approved",
+              "host-app-scoped"
+            ],
             "type": "string"
           },
           "leaseScope": {
-            "const": "process-global",
+            "enum": [
+              "process-global",
+              "target"
+            ],
             "type": "string"
           },
           "reason": {
