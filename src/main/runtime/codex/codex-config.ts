@@ -139,7 +139,11 @@ export async function resolveCodexCommand(
   const pathValue = env.PATH ?? env.Path ?? env.path ?? ''
   const searchDirs = splitSearchPath(pathValue)
   const inheritedPathMatch = await findExecutableCommand(command, searchDirs, platform, isExecutable)
-  if (inheritedPathMatch) return inheritedPathMatch
+  if (inheritedPathMatch) {
+    return platform === 'win32' && isPackagedWindowsCodexPath(inheritedPathMatch)
+      ? materializePackagedWindowsCodex(inheritedPathMatch, homeDir)
+      : inheritedPathMatch
+  }
 
   if (platform === 'darwin') {
     const getLoginShellPath = options.getLoginShellPath ?? readMacOSLoginShellPath
@@ -199,7 +203,7 @@ async function findExecutableCommand(
 ): Promise<string | null> {
   for (const directory of new Set(directories)) {
     const names = platform === 'win32'
-      ? [command, `${command}.exe`, `${command}.cmd`, `${command}.bat`]
+      ? windowsCommandNames(command)
       : [command]
     for (const name of names) {
       const candidate = join(directory, name)
@@ -207,6 +211,18 @@ async function findExecutableCommand(
     }
   }
   return null
+}
+
+function windowsCommandNames(command: string): string[] {
+  if (/\.(?:exe|cmd|bat|com)$/i.test(command)) return [command]
+  // npm and Windows app bundles can contain an extensionless Unix companion
+  // that Windows cannot launch. Prefer only native executable and shim forms.
+  return [`${command}.exe`, `${command}.cmd`, `${command}.bat`, `${command}.com`]
+}
+
+function isPackagedWindowsCodexPath(path: string): boolean {
+  const normalized = win32.normalize(path).toLowerCase()
+  return /\\windowsapps\\openai\.codex_[^\\]+\\app\\resources\\codex\.exe$/i.test(normalized)
 }
 
 const LOGIN_SHELL_PATH_START = '\u001e'
@@ -618,8 +634,8 @@ function codexConfigToml(
       'model_reasoning_summary = "detailed"',
       'model_supports_reasoning_summaries = true',
       '',
-      ...hookConfig,
-      createCodexPlanRuntimeConfig(modelAccess.baseUrl)
+      createCodexPlanRuntimeConfig(modelAccess.baseUrl),
+      ...hookConfig
     ].join('\n')
   }
   return [
@@ -630,13 +646,13 @@ function codexConfigToml(
     'model_reasoning_summary = "detailed"',
     'model_supports_reasoning_summaries = true',
     '',
-    ...hookConfig,
     `[model_providers.${DEFAULT_MODEL_ROUTER_PROVIDER_ID}]`,
     'name = "SciForge Model Router"',
     `base_url = "${tomlString(modelAccess.baseUrl)}"`,
     `env_key = "${RUNTIME_API_KEY_ENV}"`,
     'wire_api = "responses"',
-    ''
+    '',
+    ...hookConfig
   ].join('\n')
 }
 

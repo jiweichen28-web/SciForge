@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { WorkspaceLocator } from '@sciforge/domain-sdk/workspace-host'
+import {
+  principalContextSnapshotSchema,
+  type PrincipalContextSnapshot
+} from '@sciforge/domain-sdk/principal'
 import { z } from 'zod'
 import {
   CAPABILITY_BROKER_CONTRACT_VERSION,
@@ -36,6 +40,7 @@ import {
   type AgentRuntimeToolTurnIdentity,
   type NativeVisualToolErrorContext
 } from '../runtime/agent-runtime/agent-tool-surface'
+import type { AgentRuntimeBrokerScope } from '../runtime/agent-runtime/agent-tool-surface'
 
 export const CAPABILITY_AGENT_TOOL_NAMES = Object.freeze({
   discover: 'sciforge_discover',
@@ -65,6 +70,7 @@ export type CapabilityAgentToolRequestContext = Readonly<{
   workspaceId?: string
   /** Host workspace placement; never included in model-visible schemas. */
   workspaceLocator?: WorkspaceLocator
+  brokerScope?: AgentRuntimeBrokerScope
 }>
 
 export type CapabilityAgentToolCall = Readonly<{
@@ -180,7 +186,12 @@ export type AgentCapabilityEvent = Readonly<{
 export type CapabilityAgentToolResult =
   | { tool: typeof CAPABILITY_AGENT_TOOL_NAMES.discover; value: AgentOperationDescriptor[] }
   | { tool: typeof CAPABILITY_AGENT_TOOL_NAMES.observe; value: AgentCapabilityObservation }
-  | { tool: typeof CAPABILITY_AGENT_TOOL_NAMES.invoke; value: AgentCapabilityInvocation }
+  | {
+      tool: typeof CAPABILITY_AGENT_TOOL_NAMES.invoke
+      value: AgentCapabilityInvocation
+      /** Host-private; omitted from model-visible structuredContent. */
+      deliveryEffect: CapabilityDescriptor['effect']
+    }
   | { tool: typeof CAPABILITY_AGENT_TOOL_NAMES.events; value: AgentCapabilityEvent[] }
   | { tool: typeof CAPABILITY_AGENT_TOOL_NAMES.look; value: AgentVisualLookOutput }
   | { tool: typeof CAPABILITY_AGENT_TOOL_NAMES.capture; value: AgentVisualCaptureOutput }
@@ -214,6 +225,10 @@ export type CapabilityAgentBroker = Readonly<{
 export type CapabilityAgentToolSurfaceOptions = Readonly<{
   broker: CapabilityAgentBroker
   visualRuntime?: AgentVisualRuntime
+  /** Host-private historical-turn-to-live-Principal lease verifier. */
+  assertPrincipalLease?: (
+    context: CapabilityAgentToolRequestContext
+  ) => PrincipalContextSnapshot | void
   resolveCaller: (
     context: CapabilityAgentToolRequestContext
   ) => CapabilityCallerContextInput | Promise<CapabilityCallerContextInput>
@@ -235,7 +250,7 @@ type CallerCache = {
 const toolDefinitions = Object.freeze([
   defineTool(
     CAPABILITY_AGENT_TOOL_NAMES.discover,
-    'Discover current SciForge operations with an exact capabilityId or unordered text tokens. Scope, accepted/produced resource kinds, and provider family are independent filters. Native results are bounded by default; set providerFamily=managed-mcp explicitly to search managed tools. Results use opaque references; request one operation with includeSchema=true for its compact input shape.',
+    'Discover current SciForge operations with an exact capabilityId or unordered text tokens. Scope, accepted/produced resource kinds, and provider family are independent filters. When a user names an external or provider-backed service, search native operations first with the user\'s action and library terms before considering an unrelated managed tool; set providerFamily=managed-mcp only when the user explicitly selected that managed provider or native discovery is unsuitable. Results use opaque references; request one operation with includeSchema=true for its compact input shape.',
     agentDiscoverRequestSchema
   ),
   defineTool(
@@ -255,7 +270,7 @@ const toolDefinitions = Object.freeze([
   ),
   defineTool(
     CAPABILITY_AGENT_TOOL_NAMES.look,
-    'Visually inspect through the routed vision model whenever the user request, a referenced template, or a discovered task requirement needs visual understanding or extraction. Omit sourceRef for the caller-bound current SciForge surface and optionally use a targetRef published by surface.current. For an existing workspace file, open it through the canonical Workspace Preview operation and pass the returned resourceRef; for a multi-frame resource, frame is a generic 1-based index. Artifact and snapshot refs may be reused for proof-linked inspection. This tool never accepts file paths. If a persisted visual is required, declare capture=snapshot or capture=region. A region capture also requires intent=locate; persist the returned regionRef with sciforge_capture instead of the full source, then inspect the persisted artifact.',
+    'Visually inspect through the routed vision model whenever the user request, a referenced template, or a discovered task requirement needs visual understanding or extraction. Omit sourceRef for the caller-bound current SciForge surface and optionally use a targetRef published by surface.current. For an existing workspace file, open it through the canonical Workspace Preview operation and pass the returned resourceRef; for a multi-frame resource, frame is a generic 1-based index. Artifact and snapshot refs may be reused for proof-linked inspection. This tool never accepts file paths. The optional timeoutMs is the single end-to-end budget; omit it initially, and when a retryable timeout reports an exact suggested value, retry the same source and task once with that timeoutMs. If a persisted visual is required, declare capture=snapshot or capture=region. A region capture also requires intent=locate; persist the returned regionRef with sciforge_capture instead of the full source, then inspect the persisted artifact.',
     agentVisualLookInputSchema
   ),
   defineTool(
@@ -268,6 +283,9 @@ const toolDefinitions = Object.freeze([
 export class CapabilityAgentToolSurface {
   readonly #broker: CapabilityAgentBroker
   readonly #visualRuntime: AgentVisualRuntime | undefined
+  readonly #assertPrincipalLease: NonNullable<
+    CapabilityAgentToolSurfaceOptions['assertPrincipalLease']
+  >
   readonly #resolveCaller: CapabilityAgentToolSurfaceOptions['resolveCaller']
   readonly #requestApproval: CapabilityAgentToolSurfaceOptions['requestApproval']
   readonly #cancelApprovalTurn: CapabilityAgentToolSurfaceOptions['cancelApprovalTurn']
@@ -277,6 +295,7 @@ export class CapabilityAgentToolSurface {
   constructor(options: CapabilityAgentToolSurfaceOptions) {
     this.#broker = options.broker
     this.#visualRuntime = options.visualRuntime
+    this.#assertPrincipalLease = options.assertPrincipalLease ?? (() => undefined)
     this.#resolveCaller = options.resolveCaller
     this.#requestApproval = options.requestApproval
     this.#cancelApprovalTurn = options.cancelApprovalTurn
@@ -284,6 +303,10 @@ export class CapabilityAgentToolSurface {
 
   tools(): readonly CapabilityAgentToolDefinition[] {
     return toolDefinitions
+  }
+
+  assertPrincipalLease(context: CapabilityAgentToolRequestContext): void {
+    this.#assertPrincipalLease(context)
   }
 
   abortTurn(identity: AgentRuntimeToolTurnIdentity, reason = 'user_stop'): number {
@@ -305,14 +328,16 @@ export class CapabilityAgentToolSurface {
   }
 
   async call(request: CapabilityAgentToolCall, options: { signal?: AbortSignal } = {}): Promise<CapabilityAgentToolResult> {
+    const capturedPrincipalContext = this.#assertPrincipalLease(request.context)
     const caller = capabilityCallerContextSchema.parse(await this.#resolveCaller(request.context))
+    this.#assertPrincipalLease(request.context)
     if (caller.audience !== 'agent') {
       throw new CapabilityAgentToolError(
         'invalid_caller_audience',
         `The agent capability surface requires an agent caller, received ${caller.audience}.`
       )
     }
-    const cache = this.#cacheFor(caller)
+    const cache = this.#cacheFor(caller, capturedPrincipalContext)
     const rawArguments = request.arguments === undefined ? {} : request.arguments
 
     switch (request.name) {
@@ -320,10 +345,20 @@ export class CapabilityAgentToolSurface {
         const parsed = agentDiscoverRequestSchema.parse(rawArguments)
         if (parsed.operationRef) {
           const descriptor = this.#operation(cache, parsed.operationRef)
-          return {
+          const result: CapabilityAgentToolResult = {
             tool: CAPABILITY_AGENT_TOOL_NAMES.discover,
             value: [this.#agentOperation(cache, descriptor, parsed.includeSchema === true)]
           }
+          this.#assertPrincipalLease(request.context)
+          return result
+        }
+        if (request.context.brokerScope &&
+            parsed.providerFamily &&
+            parsed.providerFamily !== request.context.brokerScope.providerFamily) {
+          throw new CapabilityAgentToolError(
+            'broker_scope_denied',
+            'The requested provider family is outside the delegated broker scope.'
+          )
         }
         const descriptors = await this.#broker.discover(caller, {
           ...(parsed.capabilityId ? { capabilityId: parsed.capabilityId } : {}),
@@ -331,11 +366,14 @@ export class CapabilityAgentToolSurface {
           ...(parsed.scope ? { scope: parsed.scope } : {}),
           ...(parsed.acceptedResourceKind ? { acceptedResourceKind: parsed.acceptedResourceKind } : {}),
           ...(parsed.producedResourceKind ? { producedResourceKind: parsed.producedResourceKind } : {}),
-          ...(parsed.providerFamily ? { providerFamily: parsed.providerFamily } : {}),
+          ...(request.context.brokerScope
+            ? { providerFamily: request.context.brokerScope.providerFamily }
+            : parsed.providerFamily ? { providerFamily: parsed.providerFamily } : {}),
           ...(parsed.effects ? { effects: parsed.effects } : {}),
           ...(parsed.tags ? { tags: parsed.tags } : {}),
           limit: parsed.limit
         }, { context: request.context })
+        this.#assertPrincipalLease(request.context)
         if (descriptors.length === 0) {
           const diagnostic = emptyDiscoveryDiagnostic(parsed)
           throw new CapabilityAgentToolError(
@@ -345,19 +383,42 @@ export class CapabilityAgentToolSurface {
           )
         }
         const includeSchema = parsed.includeSchema === true && descriptors.length === 1
-        return {
+        const result: CapabilityAgentToolResult = {
           tool: CAPABILITY_AGENT_TOOL_NAMES.discover,
           value: descriptors.map((descriptor) => this.#agentOperation(cache, descriptor, includeSchema))
         }
+        this.#assertPrincipalLease(request.context)
+        return result
       }
       case CAPABILITY_AGENT_TOOL_NAMES.observe: {
         const parsed = agentObserveRequestSchema.parse(rawArguments)
-        const observation = await this.#observe(caller, cache, parsed.resourceRef)
-        return { tool: CAPABILITY_AGENT_TOOL_NAMES.observe, value: observation }
+        const observation = await this.#observe(caller, cache, parsed.resourceRef, request.context)
+        const result: CapabilityAgentToolResult = {
+          tool: CAPABILITY_AGENT_TOOL_NAMES.observe,
+          value: observation
+        }
+        this.#assertPrincipalLease(request.context)
+        return result
       }
       case CAPABILITY_AGENT_TOOL_NAMES.invoke: {
         const parsed = agentInvokeRequestSchema.parse(rawArguments)
-        return this.#invokeOperation(caller, cache, parsed, request.context, options.signal)
+        const descriptor = this.#operation(cache, parsed.operationRef)
+        const result = await this.#invokeOperation(
+          caller,
+          cache,
+          parsed,
+          request.context,
+          options.signal
+        )
+        try {
+          this.#assertPrincipalLease(request.context)
+        } catch (error) {
+          if (isMutationEffect(descriptor.effect) && isPrincipalChangedError(error)) {
+            throw outcomeUnknownAgentToolError()
+          }
+          throw error
+        }
+        return result
       }
       case CAPABILITY_AGENT_TOOL_NAMES.events: {
         const parsed = agentEventsRequestSchema.parse(rawArguments)
@@ -369,7 +430,8 @@ export class CapabilityAgentToolSurface {
           }),
           this.#broker.discover(caller)
         ])
-        return {
+        this.#assertPrincipalLease(request.context)
+        const result: CapabilityAgentToolResult = {
           tool: CAPABILITY_AGENT_TOOL_NAMES.events,
           value: events.map((event) => ({
             eventId: event.id,
@@ -381,6 +443,8 @@ export class CapabilityAgentToolSurface {
             operationRef: this.#operationRef(cache, this.#descriptorForId(descriptors, event.actionId))
           }))
         }
+        this.#assertPrincipalLease(request.context)
+        return result
       }
       case CAPABILITY_AGENT_TOOL_NAMES.look: {
         const resourceIdentity = nativeVisualResourceIdentity(rawArguments)
@@ -394,7 +458,7 @@ export class CapabilityAgentToolSurface {
             resourceIdentity
           })
         }
-        return this.#runVisualCall(
+        const result = await this.#runVisualCall(
           request.context,
           options.signal,
           { operation: 'look', resourceIdentity },
@@ -406,6 +470,8 @@ export class CapabilityAgentToolSurface {
             )
           })
         )
+        this.#assertPrincipalLease(request.context)
+        return result
       }
       case CAPABILITY_AGENT_TOOL_NAMES.capture: {
         const resourceIdentity = nativeVisualResourceIdentity(rawArguments)
@@ -419,7 +485,7 @@ export class CapabilityAgentToolSurface {
             resourceIdentity
           })
         }
-        return this.#runVisualCall(
+        const result = await this.#runVisualCall(
           request.context,
           options.signal,
           { operation: 'capture', resourceIdentity },
@@ -431,6 +497,8 @@ export class CapabilityAgentToolSurface {
             )
           })
         )
+        this.#assertPrincipalLease(request.context)
+        return result
       }
       default:
         throw new CapabilityAgentToolError('unknown_agent_tool', `Unknown capability agent tool: ${request.name}`)
@@ -455,7 +523,10 @@ export class CapabilityAgentToolSurface {
     }
     const active = this.#beginActiveCall(context, sourceSignal)
     try {
-      return await call(visualRuntime, active.signal)
+      this.#assertPrincipalLease(context)
+      const result = await call(visualRuntime, active.signal)
+      this.#assertPrincipalLease(context)
+      return result
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error
         ? String(error.code)
@@ -469,8 +540,20 @@ export class CapabilityAgentToolSurface {
     }
   }
 
-  #cacheFor(caller: CapabilityCallerContext): CallerCache {
-    const key = `${caller.callerId}\u0000${caller.workspaceId ?? ''}`
+  #cacheFor(
+    caller: CapabilityCallerContext,
+    capturedPrincipalContext: PrincipalContextSnapshot | void
+  ): CallerCache {
+    const principalLease = capturedPrincipalContext === undefined
+      ? 'unverified'
+      : JSON.stringify(principalContextSnapshotSchema.parse(capturedPrincipalContext))
+    const workspaceLocator = JSON.stringify(caller.workspaceLocator ?? null)
+    const key = [
+      caller.callerId,
+      caller.workspaceId ?? '',
+      workspaceLocator,
+      principalLease
+    ].join('\u0000')
     let cache = this.#callerCaches.get(key)
     if (!cache) {
       cache = {
@@ -493,6 +576,7 @@ export class CapabilityAgentToolSurface {
     signal?: AbortSignal
   ): Promise<CapabilityAgentToolResult> {
     const active = this.#beginActiveCall(context, signal)
+    let dispatchedEffect: CapabilityDescriptor['effect'] | undefined
     try {
       const descriptor = this.#operation(cache, parsed.operationRef)
       const invocationId = descriptor.effect === 'read'
@@ -509,6 +593,7 @@ export class CapabilityAgentToolSurface {
         parsed.resourceRef,
         parsed.resourceRef ? cache.resourceLabels.get(parsed.resourceRef) : undefined
       )
+      this.#assertPrincipalLease(context)
       const invoke = (resource: CapabilityResourceHandle | undefined) => this.#broker.invoke(invokeCaller, {
         actionId: descriptor.id,
         ...(resource ? { resource } : {}),
@@ -520,10 +605,12 @@ export class CapabilityAgentToolSurface {
       }, { signal: active.signal, context })
       let result: CapabilityInvocationResult
       try {
+        dispatchedEffect = descriptor.effect
         result = await invoke(handle)
       } catch (error) {
         if (!parsed.resourceRef || !handle || !isExpiredResourceHandleError(error)) throw error
-        const renewed = await this.#bindResourceRef(caller, parsed.resourceRef)
+        const renewed = await this.#bindResourceRef(caller, parsed.resourceRef, context)
+        this.#assertPrincipalLease(context)
         if (renewed.semanticRevision !== handle.semanticRevision) {
           throw new CapabilityAgentToolError(
             'stale_resource_ref',
@@ -532,33 +619,58 @@ export class CapabilityAgentToolSurface {
         }
         handle = renewed
         cache.resources.set(parsed.resourceRef, renewed)
+        dispatchedEffect = descriptor.effect
         result = await invoke(renewed)
       }
-      if (result.actionId !== descriptor.id) {
-        throw new CapabilityAgentToolError(
-          'capability_identity_mismatch',
-          'The capability broker returned an action identity that did not match the Host-resolved operation.'
-        )
-      }
-      const sanitizedOutput = await this.#sanitizeOutput(caller, cache, result.output)
-      let resourceRef = parsed.resourceRef
-      if (result.resource) {
-        const observed = await this.#broker.observe(caller, { resource: result.resource })
-        this.#rememberObservation(cache, observed)
-        resourceRef = observed.resourceRef
-      }
-      return {
-        tool: CAPABILITY_AGENT_TOOL_NAMES.invoke,
-        value: {
-          capabilityId: descriptor.id,
-          operationRef: parsed.operationRef,
-          output: sanitizedOutput,
-          ...(resourceRef ? { resourceRef } : {}),
-          changed: result.changed,
-          replayed: result.replayed,
-          completedAt: result.completedAt
+      try {
+        if (result.actionId !== descriptor.id) {
+          throw new CapabilityAgentToolError(
+            'capability_identity_mismatch',
+            'The capability broker returned an action identity that did not match the Host-resolved operation.'
+          )
         }
+        this.#assertPrincipalLease(context)
+        const sanitizedOutput = await this.#sanitizeOutput(caller, cache, result.output, context)
+        let resourceRef = parsed.resourceRef
+        if (result.resource) {
+          this.#assertPrincipalLease(context)
+          const observed = await this.#broker.observe(caller, { resource: result.resource })
+          this.#assertPrincipalLease(context)
+          this.#rememberObservation(cache, observed)
+          resourceRef = observed.resourceRef
+        }
+        this.#assertPrincipalLease(context)
+        return {
+          tool: CAPABILITY_AGENT_TOOL_NAMES.invoke,
+          deliveryEffect: descriptor.effect,
+          value: {
+            capabilityId: descriptor.id,
+            operationRef: parsed.operationRef,
+            output: sanitizedOutput,
+            ...(resourceRef ? { resourceRef } : {}),
+            changed: result.changed,
+            replayed: result.replayed,
+            completedAt: result.completedAt
+          }
+        }
+      } catch (error) {
+        if (
+          isMutationEffect(descriptor.effect) &&
+          (isPrincipalChangedError(error) || isOutcomeUnknownError(error))
+        ) {
+          throw outcomeUnknownAgentToolError()
+        }
+        throw error
       }
+    } catch (error) {
+      if (
+        dispatchedEffect !== undefined &&
+        isMutationEffect(dispatchedEffect) &&
+        (isPrincipalChangedError(error) || isOutcomeUnknownError(error))
+      ) {
+        throw outcomeUnknownAgentToolError()
+      }
+      throw error
     } finally {
       active.close()
     }
@@ -623,6 +735,7 @@ export class CapabilityAgentToolSurface {
       ...(resourceRef ? { resourceRef } : {}),
       ...(resourceLabel ? { resourceLabel } : {})
     }, options)
+    this.#assertPrincipalLease(context)
     if (decision !== 'allowed') {
       throw new CapabilityAgentToolError(
         decision === 'cancelled' ? 'approval_cancelled' : 'approval_denied',
@@ -695,20 +808,25 @@ export class CapabilityAgentToolSurface {
   async #observe(
     caller: CapabilityCallerContext,
     cache: CallerCache,
-    resourceRef: string
+    resourceRef: string,
+    context: CapabilityAgentToolRequestContext
   ): Promise<AgentCapabilityObservation> {
     let resource = cache.resources.get(resourceRef)
-    if (!resource) resource = await this.#bindResourceRef(caller, resourceRef)
+    if (!resource) resource = await this.#bindResourceRef(caller, resourceRef, context)
     let observation: CapabilityObservation
     try {
+      this.#assertPrincipalLease(context)
       observation = await this.#broker.observe(caller, { resource })
     } catch (error) {
       if (!isExpiredResourceHandleError(error)) throw error
-      resource = await this.#bindResourceRef(caller, resourceRef)
+      resource = await this.#bindResourceRef(caller, resourceRef, context)
+      this.#assertPrincipalLease(context)
       observation = await this.#broker.observe(caller, { resource })
     }
+    this.#assertPrincipalLease(context)
     this.#rememberObservation(cache, observation)
-    const state = await this.#sanitizeOutput(caller, cache, observation.state)
+    const state = await this.#sanitizeOutput(caller, cache, observation.state, context)
+    this.#assertPrincipalLease(context)
     return {
       resourceRef: observation.resourceRef,
       resourceKind: observation.resourceKind,
@@ -720,10 +838,16 @@ export class CapabilityAgentToolSurface {
 
   async #bindResourceRef(
     caller: CapabilityCallerContext,
-    resourceRef: string
+    resourceRef: string,
+    context: CapabilityAgentToolRequestContext
   ): Promise<CapabilityResourceHandle> {
     try {
-      return capabilityResourceHandleSchema.parse(await this.#broker.bindResourceRef(caller, resourceRef))
+      this.#assertPrincipalLease(context)
+      const handle = capabilityResourceHandleSchema.parse(
+        await this.#broker.bindResourceRef(caller, resourceRef)
+      )
+      this.#assertPrincipalLease(context)
+      return handle
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
       if (code === 'resource_ref_retired') {
@@ -749,32 +873,40 @@ export class CapabilityAgentToolSurface {
   async #sanitizeOutput(
     caller: CapabilityCallerContext,
     cache: CallerCache,
-    value: CapabilityJsonValue
+    value: CapabilityJsonValue,
+    context: CapabilityAgentToolRequestContext
   ): Promise<CapabilityJsonValue> {
     const handle = capabilityResourceHandleSchema.safeParse(value)
     if (handle.success) {
+      this.#assertPrincipalLease(context)
       const observation = await this.#broker.observe(caller, { resource: handle.data })
+      this.#assertPrincipalLease(context)
       this.#rememberObservation(cache, observation)
       return { resourceRef: observation.resourceRef }
     }
     if (isRecord(value) && 'resource' in value) {
       const nestedHandle = capabilityResourceHandleSchema.safeParse(value.resource)
       if (nestedHandle.success) {
+        this.#assertPrincipalLease(context)
         const observation = await this.#broker.observe(caller, { resource: nestedHandle.data })
+        this.#assertPrincipalLease(context)
         this.#rememberObservation(cache, observation)
         const entries = await Promise.all(Object.entries(value)
           .filter(([key]) => key !== 'resource')
-          .map(async ([key, entry]) => [key, await this.#sanitizeOutput(caller, cache, entry)] as const))
+          .map(async ([key, entry]) => [
+            key,
+            await this.#sanitizeOutput(caller, cache, entry, context)
+          ] as const))
         return { ...Object.fromEntries(entries), resourceRef: observation.resourceRef }
       }
     }
     if (Array.isArray(value)) {
-      return Promise.all(value.map((entry) => this.#sanitizeOutput(caller, cache, entry)))
+      return Promise.all(value.map((entry) => this.#sanitizeOutput(caller, cache, entry, context)))
     }
     if (value && typeof value === 'object') {
       const entries = await Promise.all(Object.entries(value).map(async ([key, entry]) => [
         key,
-        await this.#sanitizeOutput(caller, cache, entry)
+        await this.#sanitizeOutput(caller, cache, entry, context)
       ] as const))
       return Object.fromEntries(entries)
     }
@@ -796,24 +928,29 @@ export class CapabilityAgentToolError extends Error {
     | 'unknown_resource_ref'
     | 'resource_ref_retired'
     | 'capability_discovery_empty'
+    | 'broker_scope_denied'
     | 'capability_identity_mismatch'
     | 'stale_resource_ref'
     | 'missing_invocation_context'
     | 'approval_denied'
     | 'approval_cancelled'
+    | 'principal_changed'
+    | 'outcome_unknown'
     | 'visual_runtime_unavailable'
     | 'invalid_visual_result'
   readonly details?: CapabilityJsonValue
+  readonly retryable?: boolean
 
   constructor(
     code: CapabilityAgentToolError['code'],
     message: string,
-    options: { details?: CapabilityJsonValue } = {}
+    options: { details?: CapabilityJsonValue; retryable?: boolean } = {}
   ) {
     super(message)
     this.name = 'CapabilityAgentToolError'
     this.code = code
     this.details = options.details
+    this.retryable = options.retryable
   }
 }
 
@@ -897,6 +1034,36 @@ function isExpiredResourceHandleError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const code = 'code' in error ? String(error.code) : ''
   return code === 'resource_handle_expired' || code === 'invalid_resource_handle'
+}
+
+function isPrincipalChangedError(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    String(error.code) === 'principal_changed'
+  )
+}
+
+function isOutcomeUnknownError(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    String(error.code) === 'outcome_unknown'
+  )
+}
+
+function outcomeUnknownAgentToolError(): CapabilityAgentToolError {
+  return new CapabilityAgentToolError(
+    'outcome_unknown',
+    'The Principal changed after capability dispatch; the mutation outcome is unknown and must not be retried blindly.',
+    { retryable: false }
+  )
+}
+
+function isMutationEffect(effect: CapabilityDescriptor['effect']): boolean {
+  return effect !== 'read'
 }
 
 function defineTool(

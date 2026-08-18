@@ -21,6 +21,15 @@ export type AgentRuntimeToolCallContext = Readonly<{
   turnId?: string
   callId?: string
   workspaceId?: string
+  /** Host-only least-privilege filter for broker-backed tools. */
+  brokerScope?: AgentRuntimeBrokerScope
+  /** Parent execution allowlist used to prevent delegated privilege expansion. */
+  allowedToolNames?: readonly string[]
+}>
+
+export type AgentRuntimeBrokerScope = Readonly<{
+  providerFamily: 'managed-mcp'
+  packageName?: string
 }>
 
 export type AgentRuntimeToolCall = Readonly<{
@@ -32,6 +41,8 @@ export type AgentRuntimeToolCall = Readonly<{
 export type AgentRuntimeToolResult = Readonly<{
   tool: string
   value: unknown
+  /** Host-private delivery classification; runtime adapters must not expose it to the model. */
+  deliveryEffect?: 'read' | 'compute' | 'workspace-write' | 'external-write' | 'destructive'
 }>
 
 export type NativeAgentToolExecutionMetadata = Readonly<{
@@ -126,6 +137,53 @@ export type AgentRuntimeToolRecovery = Readonly<{
   instruction: string
 }>
 
+/**
+ * Produces the canonical model-visible failure payload for every in-process
+ * runtime tool transport. Keep this deliberately limited to the stable error
+ * contract: provider response bodies and other untrusted diagnostics must not
+ * be reflected back into the model context.
+ */
+export function modelVisibleAgentRuntimeToolFailure(
+  toolName: string,
+  error: unknown
+): string {
+  const record = error && typeof error === 'object'
+    ? error as Record<string, unknown>
+    : {}
+  const recoveryRecord = record.recovery && typeof record.recovery === 'object'
+    ? record.recovery as Record<string, unknown>
+    : {}
+  const message = error instanceof Error ? error.message : String(error)
+  const code = optionalString(record.code) ?? 'runtime_tool_error'
+  const failureClass = optionalString(record.failureClass)
+  const providerStage = optionalString(record.providerStage)
+  const resourceIdentity = optionalString(record.resourceIdentity)
+  const recoveryAction = optionalString(recoveryRecord.action)
+  const recoveryInstruction = optionalString(recoveryRecord.instruction)
+    ?? optionalString(record.recoveryGuidance)
+
+  return JSON.stringify({
+    tool: toolName,
+    status: 'failed',
+    error: {
+      code,
+      message,
+      ...(failureClass ? { failureClass } : {}),
+      ...(typeof record.retryable === 'boolean' ? { retryable: record.retryable } : {}),
+      ...(providerStage ? { providerStage } : {}),
+      ...(resourceIdentity ? { resourceIdentity } : {}),
+      ...(recoveryAction || recoveryInstruction
+        ? {
+            recovery: {
+              ...(recoveryAction ? { action: recoveryAction } : {}),
+              ...(recoveryInstruction ? { instruction: recoveryInstruction } : {})
+            }
+          }
+        : {})
+    }
+  }, null, 2)
+}
+
 export type NativeVisualToolErrorCode =
   | 'visual_invalid_arguments'
   | 'visual_invalid_result'
@@ -140,6 +198,7 @@ export type NativeVisualToolErrorCode =
   | 'visual_snapshot_stale'
   | 'visual_target_stale'
   | 'visual_inspection_unavailable'
+  | 'visual_inspection_timeout'
   | 'visual_inspection_invalid'
   | 'visual_inspection_unverified'
   | 'visual_evidence_attestation_missing'
@@ -616,6 +675,8 @@ function errorMessage(error: unknown): string {
  */
 export type AgentRuntimeToolSurface = Readonly<{
   tools(): readonly AgentRuntimeToolDefinition[]
+  /** Host-private exact historical-turn Principal lease verification. */
+  assertPrincipalLease?(context: AgentRuntimeToolCallContext): void
   call(
     request: AgentRuntimeToolCall,
     options?: { signal?: AbortSignal }
@@ -640,6 +701,7 @@ export function filterAgentRuntimeToolSurface(
   const allowed = new Set(allowedTools)
   return {
     tools: () => surface.tools().filter((tool) => allowed.has(tool.name)),
+    assertPrincipalLease: (context) => surface.assertPrincipalLease?.(context),
     call: (request, options) => {
       if (!allowed.has(request.name)) {
         throw new Error(`AgentRuntime tool is not allowed for this execution: ${request.name}`)
@@ -647,6 +709,40 @@ export function filterAgentRuntimeToolSurface(
       return surface.call(request, options)
     },
     abortTurn: (identity, reason) => surface.abortTurn?.(identity, reason) ?? 0
+  }
+}
+
+/** Applies one child-execution policy to publication, dispatch, and broker context. */
+export function scopeAgentRuntimeToolSurface(
+  surface: AgentRuntimeToolSurface,
+  policy: Readonly<{
+    allowedTools?: readonly string[]
+    brokerScope?: AgentRuntimeBrokerScope
+    maxToolCalls?: number
+  }>
+): AgentRuntimeToolSurface {
+  const filtered = filterAgentRuntimeToolSurface(surface, policy.allowedTools)
+  const maxToolCalls = policy.maxToolCalls === undefined
+    ? undefined
+    : Math.max(1, Math.trunc(policy.maxToolCalls))
+  let toolCalls = 0
+  return {
+    tools: () => filtered.tools(),
+    call: (request, options) => {
+      if (maxToolCalls !== undefined && toolCalls >= maxToolCalls) {
+        throw new Error(`AgentRuntime child exceeded its ${maxToolCalls} tool-call budget.`)
+      }
+      toolCalls += 1
+      return filtered.call({
+        ...request,
+        context: {
+          ...request.context,
+          ...(policy.allowedTools ? { allowedToolNames: policy.allowedTools } : {}),
+          ...(policy.brokerScope ? { brokerScope: policy.brokerScope } : {})
+        }
+      }, options)
+    },
+    abortTurn: (identity, reason) => filtered.abortTurn?.(identity, reason) ?? 0
   }
 }
 
@@ -671,6 +767,9 @@ export function composeAgentRuntimeToolSurfaces(
       owners()
       return surfaces.flatMap((surface) => [...surface.tools()])
     },
+    assertPrincipalLease: (context) => {
+      for (const surface of surfaces) surface.assertPrincipalLease?.(context)
+    },
     call: (request, options) => {
       const owner = owners().get(request.name)
       if (!owner) throw new Error(`Unknown AgentRuntime tool: ${request.name}`)
@@ -689,6 +788,11 @@ export function createDeferredAgentRuntimeToolSurface(
 ): AgentRuntimeToolSurface {
   return {
     tools: () => resolve()?.tools() ?? [],
+    assertPrincipalLease: (context) => {
+      const surface = resolve()
+      if (!surface) throw new Error('AgentRuntime Host tools are not initialized.')
+      surface.assertPrincipalLease?.(context)
+    },
     call: (request, options) => {
       const surface = resolve()
       if (!surface) throw new Error('AgentRuntime Host tools are not initialized.')

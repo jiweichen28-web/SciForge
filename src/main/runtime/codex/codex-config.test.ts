@@ -146,11 +146,12 @@ describe('codex config launch helpers', () => {
     })).resolves.toBe(join(newerBin, 'codex'))
   })
 
-  it('finds the Windows cmd shim when Explorer provides Path instead of PATH', async () => {
+  it('skips the extensionless Windows npm shim and resolves its cmd wrapper', async () => {
     const home = await mkdtemp(join(tmpdir(), 'sciforge-codex-windows-'))
     const npmBin = join(home, 'AppData', 'Roaming', 'npm')
     const command = join(npmBin, 'codex.cmd')
     await mkdir(npmBin, { recursive: true })
+    await writeFile(join(npmBin, 'codex'), '#!/usr/bin/env node\n', 'utf8')
     await writeFile(command, '@echo off\r\n', 'utf8')
 
     await expect(resolveCodexCommand('codex', {
@@ -164,6 +165,49 @@ describe('codex config launch helpers', () => {
         throw new Error('must not inspect a Unix shell on Windows')
       }
     })).resolves.toBe(command)
+  })
+
+  it('resolves an explicitly configured Windows cmd wrapper outside Explorer Path', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sciforge-codex-windows-explicit-'))
+    const npmBin = join(home, 'AppData', 'Roaming', 'npm')
+    const command = join(npmBin, 'codex.cmd')
+    await mkdir(npmBin, { recursive: true })
+    await writeFile(command, '@echo off\r\n', 'utf8')
+
+    await expect(resolveCodexCommand('codex.cmd', {
+      env: {
+        Path: 'C:\\Windows\\System32',
+        APPDATA: join(home, 'AppData', 'Roaming')
+      },
+      homeDir: home,
+      platform: 'win32'
+    })).resolves.toBe(command)
+  })
+
+  it('prefers and materializes a native Windows app executable over an extensionless companion', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sciforge-codex-windows-native-'))
+    const bin = join(
+      home,
+      'Program Files',
+      'WindowsApps',
+      'OpenAI.Codex_26.810.7004.0_x64__test',
+      'app',
+      'resources'
+    )
+    const nativeCommand = join(bin, 'codex.exe')
+    await mkdir(bin, { recursive: true })
+    await writeFile(join(bin, 'codex'), 'platform-neutral binary', 'utf8')
+    await writeFile(nativeCommand, 'native Windows binary', 'utf8')
+
+    await expect(resolveCodexCommand('codex', {
+      env: { PATH: bin },
+      homeDir: home,
+      platform: 'win32'
+    })).resolves.toBe(join(home, '.sciforge', 'codex-runtime', 'codex.exe'))
+    await expect(readFile(
+      join(home, '.sciforge', 'codex-runtime', 'codex.exe'),
+      'utf8'
+    )).resolves.toBe('native Windows binary')
   })
 
   it('materializes the runtime bundled with the Windows Codex app', async () => {
@@ -425,6 +469,32 @@ describe('codex config launch helpers', () => {
         }]
       }
     })
+  })
+
+  it('keeps the Coding Plan provider at the TOML root when hooks are enabled', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sciforge-codex-plan-hook-home-'))
+    const codexHome = join(root, 'codex-home')
+    const current = settings(codexHome)
+    current.modelAccess = { mode: 'coding-plan', planAdapterId: 'codex' }
+
+    await prepareCodexAppServerLaunch({
+      settings: current,
+      planGateway: { baseUrl: 'http://127.0.0.1:47931/v1/' },
+      preToolUseHookLaunch: {
+        appPath: join(root, 'SciForge App'),
+        execPath: process.execPath,
+        isPackaged: false
+      }
+    })
+
+    const config = await readFile(join(codexHome, 'config.toml'), 'utf8')
+    const provider = `model_provider = "${CODEX_PLAN_GATEWAY_PROVIDER_ID}"`
+    const providerIndex = config.indexOf(provider)
+    const featuresIndex = config.indexOf('[features]')
+
+    expect(providerIndex).toBeGreaterThanOrEqual(0)
+    expect(featuresIndex).toBeGreaterThanOrEqual(0)
+    expect(providerIndex).toBeLessThan(featuresIndex)
   })
 
   it('drops Codex runtime-only profile args before launching app-server', async () => {

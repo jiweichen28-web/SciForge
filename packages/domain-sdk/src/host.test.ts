@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   domainArtifactEventScope,
+  defineDomainMainInternalServiceDescriptor,
   defineDomainMainSystemCapabilityGrant,
   domainMainRuntimeLifecycleContractSchema,
+  domainWorkbenchRightPanelPlacementSchema,
   isDomainArtifactConsumer,
   isDomainMainActionGuard,
   isDomainMainRuntimeMcpServerContribution,
@@ -16,10 +18,36 @@ import {
   type DomainRendererCapabilityChange,
   type DomainRendererCapabilityInvoker,
   type DomainVisibleContextInspection,
-  type DomainWorkbenchRightPanelRenderContext
+  type DomainWorkbenchOpenRightPanelInput,
+  type DomainWorkbenchRightPanelRenderContext,
+  type DomainWorkbenchRightPanelTarget,
+  type DomainWorkspacePreviewTarget
 } from './host.js'
 
 describe('domain host contracts', () => {
+  it('defines strict non-callable internal service descriptors', () => {
+    assert.deepEqual(defineDomainMainInternalServiceDescriptor({
+      location: 'main.internal-service-descriptor',
+      serviceId: 'opencontent.content-space',
+      contractVersion: '1.0.0',
+      allowedConsumerModuleIds: ['sciforge.opencontent-content-space-provider']
+    }), {
+      location: 'main.internal-service-descriptor',
+      serviceId: 'opencontent.content-space',
+      contractVersion: '1.0.0',
+      allowedConsumerModuleIds: ['sciforge.opencontent-content-space-provider']
+    })
+    assert.throws(() => defineDomainMainInternalServiceDescriptor({
+      location: 'main.internal-service-descriptor',
+      serviceId: 'opencontent.content-space',
+      contractVersion: '1.0.0',
+      allowedConsumerModuleIds: [
+        'sciforge.opencontent-content-space-provider',
+        'sciforge.opencontent-content-space-provider'
+      ]
+    }))
+  })
+
   it('validates runtime lifecycle and artifact consumer contributions structurally', () => {
     assert.equal(isDomainMainRuntimeLifecycleContribution({
       activate: () => undefined
@@ -109,9 +137,11 @@ describe('domain host contracts', () => {
     }), false)
   })
 
-  it('models right-panel session identity separately from optional activation data', () => {
+  it('models right-panel viewport visibility separately from focus and mounted identity', () => {
     const context: DomainWorkbenchRightPanelRenderContext = {
       active: true,
+      focused: false,
+      surfaceId: 'right-panel-surface-2',
       className: 'h-full',
       onCollapse: () => undefined,
       session: {
@@ -125,9 +155,51 @@ describe('domain host contracts', () => {
         payload: { selection: 'node-3' }
       }
     }
+    const mountedOffscreenContext: DomainWorkbenchRightPanelRenderContext = {
+      ...context,
+      active: false,
+      focused: false,
+      surfaceId: 'right-panel-surface-3'
+    }
 
     assert.equal(context.session.workspaceRoot, '/workspace/owner')
+    assert.equal(context.active, true)
+    assert.equal(context.focused, false)
+    assert.equal(context.surfaceId, 'right-panel-surface-2')
+    assert.equal(mountedOffscreenContext.active, false)
+    assert.equal(mountedOffscreenContext.surfaceId, 'right-panel-surface-3')
     assert.deepEqual(context.activation?.payload, { selection: 'node-3' })
+  })
+
+  it('models mutually exclusive focused, new, and exact right-panel targets', () => {
+    const defaultTarget: DomainWorkbenchRightPanelTarget = {}
+    const rightPanel: DomainWorkbenchOpenRightPanelInput = {
+      contributionId: 'example.panel',
+      sessionId: 'session-owner',
+      placement: 'new'
+    }
+    const preview: DomainWorkspacePreviewTarget = {
+      path: 'results/figure.png',
+      sessionId: 'session-owner',
+      placement: 'focused'
+    }
+    const exactPreview: DomainWorkspacePreviewTarget = {
+      path: 'results/table.csv',
+      sessionId: 'session-owner',
+      surfaceId: 'right-panel-surface-2'
+    }
+    // @ts-expect-error Exact Host surface targeting cannot also create a new pane.
+    const ambiguousTarget: DomainWorkbenchRightPanelTarget = {
+      placement: 'new',
+      surfaceId: 'right-panel-surface-2'
+    }
+
+    assert.deepEqual(defaultTarget, {})
+    assert.equal(domainWorkbenchRightPanelPlacementSchema.parse(rightPanel.placement), 'new')
+    assert.equal(domainWorkbenchRightPanelPlacementSchema.parse(preview.placement), 'focused')
+    assert.equal(exactPreview.surfaceId, 'right-panel-surface-2')
+    assert.equal(ambiguousTarget.placement, 'new')
+    assert.equal(domainWorkbenchRightPanelPlacementSchema.safeParse('replace-all').success, false)
   })
 
   it('models text reasoning access without exposing host settings', async () => {

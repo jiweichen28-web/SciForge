@@ -385,6 +385,20 @@ describe('Claude child summary index', () => {
     await expect(service.listThreadChildren({ threadId: 'parent-thread' })).resolves.toMatchObject({
       children: [expect.objectContaining({ id: 'child-1', status: 'completed', summary: 'Done' })]
     })
+    await service.publishSyntheticEvent({
+      runtimeId: 'claude',
+      threadId: 'parent-thread',
+      kind: 'child_event',
+      child: {
+        ...child,
+        status: 'completed',
+        metadata: { lifecycleOperation: 'delete' },
+        updatedAt: '2026-08-09T00:00:02.000Z'
+      }
+    })
+    await expect(service.listThreadChildren({ threadId: 'parent-thread' })).resolves.toMatchObject({
+      children: []
+    })
     expect(readSpy).toHaveBeenCalledTimes(1)
   })
 })
@@ -406,6 +420,9 @@ describe('ClaudeCodeRuntimeService', () => {
       claudeAgentSdk: sdk
     })
     const spawned = vi.fn()
+    const threadBound = vi.fn(async () => {
+      expect(calls).toHaveLength(0)
+    })
     const completion = service.spawnSubagent({
       childId: 'claude-child-1',
       parentThreadId: 'parent-thread',
@@ -413,6 +430,7 @@ describe('ClaudeCodeRuntimeService', () => {
       prompt: 'Review the repository.',
       signal: new AbortController().signal,
       appendTranscript: vi.fn(async () => undefined),
+      onThreadBound: threadBound,
       onSpawned: spawned
     })
     await vi.waitFor(() => expect(spawned).toHaveBeenCalledWith({
@@ -420,6 +438,10 @@ describe('ClaudeCodeRuntimeService', () => {
       threadId: expect.any(String),
       turnId: expect.any(String)
     }))
+    expect(threadBound).toHaveBeenCalledWith({
+      runtime: 'claude',
+      threadId: expect.any(String)
+    })
     await expect(service.inspectSubagent({
       childId: 'claude-child-1',
       parentThreadId: 'parent-thread',
@@ -444,7 +466,8 @@ describe('ClaudeCodeRuntimeService', () => {
       value: { type: 'user', message: { content: 'Please include a progress update.' }, priority: 'now' }
     })
     release()
-    await expect(completion).resolves.toMatchObject({
+    const completed = await completion
+    expect(completed).toMatchObject({
       summary: 'review complete',
       threadRef: { runtime: 'claude', turnId: expect.any(String) }
     })
@@ -454,6 +477,134 @@ describe('ClaudeCodeRuntimeService', () => {
       parentTurnId: 'parent-turn',
       signal: new AbortController().signal
     })).resolves.toMatchObject({ state: 'missing' })
+
+    const resumedSpawned = vi.fn()
+    const resumedThreadBound = vi.fn(async () => {
+      expect(calls).toHaveLength(1)
+    })
+    const resumed = await service.resumeSubagent({
+      childId: 'claude-child-1',
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn-2',
+      prompt: 'Continue and finish the review.',
+      threadRef: completed.threadRef!,
+      signal: new AbortController().signal,
+      appendTranscript: vi.fn(async () => undefined),
+      onThreadBound: resumedThreadBound,
+      onSpawned: resumedSpawned
+    })
+    expect(resumed.threadRef?.threadId).toBe(completed.threadRef?.threadId)
+    expect(resumedSpawned).toHaveBeenCalledOnce()
+    expect(resumedThreadBound).toHaveBeenCalledWith({
+      runtime: 'claude',
+      threadId: completed.threadRef?.threadId
+    })
+    expect(calls).toHaveLength(2)
+
+    await service.deleteSubagent({
+      childId: 'claude-child-1',
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn-2',
+      threadRef: resumed.threadRef,
+      signal: new AbortController().signal
+    })
+    await expect(service.listThreads({ includeArchived: true })).resolves.toMatchObject({
+      threads: []
+    })
+  })
+
+  it('rolls back a persistent Claude child thread when turn startup fails', async () => {
+    const { sdk } = fakeSdk(async () => [])
+    const service = new ClaudeCodeRuntimeService({
+      settings: async () => settings(),
+      storageRoot: await serviceRoot(),
+      claudeAgentSdk: sdk
+    })
+    vi.spyOn(service, 'startTurn').mockResolvedValue({
+      ok: false,
+      message: 'turn startup failed',
+      code: 'turn_start_failed',
+      recoverable: true
+    })
+    const rollback = vi.spyOn(service, 'deleteThread')
+
+    await expect(service.spawnSubagent({
+      childId: 'rollback-child',
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn',
+      prompt: 'This child must be rolled back.',
+      signal: new AbortController().signal,
+      appendTranscript: vi.fn(async () => undefined),
+      onThreadBound: vi.fn(),
+      onSpawned: vi.fn()
+    })).rejects.toThrow('turn startup failed')
+    expect(rollback).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the startup error as cause when Claude child rollback also fails', async () => {
+    const { sdk } = fakeSdk(async () => [])
+    const service = new ClaudeCodeRuntimeService({
+      settings: async () => settings(),
+      storageRoot: await serviceRoot(),
+      claudeAgentSdk: sdk
+    })
+    vi.spyOn(service, 'startTurn').mockResolvedValue({
+      ok: false,
+      message: 'primary startup failure',
+      code: 'turn_start_failed',
+      recoverable: true
+    })
+    vi.spyOn(service, 'deleteThread').mockResolvedValue({
+      ok: false,
+      message: 'rollback failure',
+      code: 'rollback_failed',
+      recoverable: true
+    })
+
+    await expect(service.spawnSubagent({
+      childId: 'aggregate-child',
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn',
+      prompt: 'This child startup fails.',
+      signal: new AbortController().signal,
+      appendTranscript: vi.fn(async () => undefined),
+      onThreadBound: vi.fn(),
+      onSpawned: vi.fn()
+    })).rejects.toSatisfy((error: unknown) =>
+      error instanceof AggregateError &&
+      error.cause instanceof Error &&
+      error.cause.message === 'primary startup failure' &&
+      error.errors.some((entry) => entry instanceof Error && entry.message === 'rollback failure')
+    )
+  })
+
+  it('does not delete an existing Claude child thread when resume startup fails', async () => {
+    const { sdk } = fakeSdk(async () => [])
+    const service = new ClaudeCodeRuntimeService({
+      settings: async () => settings(),
+      storageRoot: await serviceRoot(),
+      claudeAgentSdk: sdk
+    })
+    vi.spyOn(service, 'startTurn').mockResolvedValue({
+      ok: false,
+      message: 'resume startup failed',
+      code: 'turn_start_failed',
+      recoverable: true
+    })
+    const rollback = vi.spyOn(service, 'deleteThread')
+
+    await expect(service.resumeSubagent({
+      childId: 'resume-child',
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn-2',
+      prompt: 'Resume without deleting the existing thread.',
+      threadRef: { runtime: 'claude', threadId: 'existing-claude-thread' },
+      signal: new AbortController().signal,
+      appendTranscript: vi.fn(async () => undefined),
+      onThreadBound: vi.fn(),
+      onSpawned: vi.fn()
+    })).rejects.toThrow('resume startup failed')
+    expect(rollback).not.toHaveBeenCalled()
   })
 
   it('denies non-native visual bypasses before Claude dispatch while the Host snapshot is pending', async () => {

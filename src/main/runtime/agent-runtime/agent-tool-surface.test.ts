@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   AgentRuntimeToolError,
+  composeAgentRuntimeToolSurfaces,
+  createDeferredAgentRuntimeToolSurface,
   filterAgentRuntimeToolSurface,
   nativeAgentToolExecutionMetadata,
   nativeVisualResourceIdentity,
-  normalizeNativeVisualToolError
+  normalizeNativeVisualToolError,
+  scopeAgentRuntimeToolSurface
 } from './agent-tool-surface'
 
 describe('filterAgentRuntimeToolSurface', () => {
@@ -29,6 +32,83 @@ describe('filterAgentRuntimeToolSurface', () => {
       context: { requestId: 'request', runtimeId: 'codex' }
     })).toThrow(/not allowed/)
     expect(calls).toEqual([])
+  })
+
+  it('preserves synchronous Principal lease verification through filtered, composed, and deferred wrappers', () => {
+    const verified: string[] = []
+    const context = {
+      requestId: 'request',
+      runtimeId: 'codex',
+      threadId: 'thread',
+      turnId: 'turn'
+    }
+    const first = {
+      tools: () => [{
+        type: 'function' as const,
+        name: 'first_tool',
+        description: 'first',
+        inputSchema: {}
+      }],
+      assertPrincipalLease: () => verified.push('first'),
+      call: async () => ({ tool: 'first_tool', value: {} })
+    }
+    const second = {
+      tools: () => [{
+        type: 'function' as const,
+        name: 'second_tool',
+        description: 'second',
+        inputSchema: {}
+      }],
+      assertPrincipalLease: () => verified.push('second'),
+      call: async () => ({ tool: 'second_tool', value: {} })
+    }
+
+    filterAgentRuntimeToolSurface(first as never, ['first_tool'])
+      .assertPrincipalLease?.(context)
+    composeAgentRuntimeToolSurfaces([first, second] as never)
+      .assertPrincipalLease?.(context)
+
+    let resolved: typeof first | undefined
+    const deferred = createDeferredAgentRuntimeToolSurface(() => resolved as never)
+    expect(() => deferred.assertPrincipalLease?.(context)).toThrow(/not initialized/)
+    resolved = first
+    deferred.assertPrincipalLease?.(context)
+
+    expect(verified).toEqual(['first', 'first', 'second', 'first'])
+  })
+})
+
+describe('scopeAgentRuntimeToolSurface', () => {
+  it('injects broker scope, enforces the allowlist, and stops at maxToolCalls', async () => {
+    const contexts: unknown[] = []
+    const source = {
+      tools: () => [
+        { type: 'function' as const, name: 'sciforge_discover', description: 'discover', inputSchema: {} },
+        { type: 'function' as const, name: 'shell', description: 'shell', inputSchema: {} }
+      ],
+      call: async (request: { name: string; context: unknown }) => {
+        contexts.push(request.context)
+        return { tool: request.name, value: {} }
+      }
+    }
+    const scoped = scopeAgentRuntimeToolSurface(source as never, {
+      allowedTools: ['sciforge_discover'],
+      brokerScope: { providerFamily: 'managed-mcp', packageName: '@sciforge/domain-computer-use' },
+      maxToolCalls: 1
+    })
+    expect(scoped.tools().map((tool) => tool.name)).toEqual(['sciforge_discover'])
+    await scoped.call({
+      name: 'sciforge_discover', arguments: {},
+      context: { requestId: 'one', runtimeId: 'codex' }
+    })
+    expect(contexts).toEqual([expect.objectContaining({
+      allowedToolNames: ['sciforge_discover'],
+      brokerScope: { providerFamily: 'managed-mcp', packageName: '@sciforge/domain-computer-use' }
+    })])
+    expect(() => scoped.call({
+      name: 'sciforge_discover', arguments: {},
+      context: { requestId: 'two', runtimeId: 'codex' }
+    })).toThrow(/tool-call budget/)
   })
 })
 

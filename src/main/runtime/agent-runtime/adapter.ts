@@ -24,6 +24,11 @@ import type {
 } from '../../../shared/agent-runtime-contract'
 import type { WorkspaceHostPlacement } from '../../../shared/workspace-host-state'
 import type { WorkspaceLocator } from '@sciforge/domain-sdk/workspace-host'
+import type { AgentRuntimeBrokerScope } from './agent-tool-surface'
+import type {
+  PrincipalContextSnapshot,
+  PrincipalSnapshot
+} from '@sciforge/domain-sdk/principal'
 
 export type AgentRuntimeAdapterContext = {
   settings: AppSettingsV1
@@ -31,6 +36,10 @@ export type AgentRuntimeAdapterContext = {
   turnGovernanceSnapshot?: AgentRuntimeTurnGovernanceSnapshot
   /** @internal Host durability acknowledgement required before startTurn resolves. */
   onTurnAccepted?: (handle: AgentRuntimeTurnHandle) => Promise<void>
+  /** @internal Host-captured turn attribution. Never populated from provider payloads. */
+  principal?: PrincipalSnapshot
+  /** @internal Exact Host authorization lease, including signed-out revisions. */
+  principalContext?: PrincipalContextSnapshot
 }
 
 /** Adapter-owned exact identity persisted before provider launch. */
@@ -185,8 +194,12 @@ export type AgentRuntimeSubagentSpawnInput = AgentRuntimeSubagentTarget & {
   prompt: string
   workspace?: string
   model?: string
+  allowedTools?: readonly string[]
+  brokerScope?: AgentRuntimeBrokerScope
+  maxToolCalls?: number
   signal: AbortSignal
   appendTranscript(entry: AgentRuntimeSubagentTranscriptEntry): Promise<void>
+  onThreadBound(threadRef: AgentRuntimeSubagentThreadRef): void | Promise<void>
   onSpawned(threadRef: AgentRuntimeSubagentThreadRef): void | Promise<void>
 }
 
@@ -204,15 +217,28 @@ export type AgentRuntimeSubagentCancelInput = AgentRuntimeSubagentTarget & {
   signal: AbortSignal
 }
 
+export type AgentRuntimeSubagentResumeInput = AgentRuntimeSubagentSpawnInput & {
+  threadRef: AgentRuntimeSubagentThreadRef
+}
+
+export type AgentRuntimeSubagentDeleteInput = AgentRuntimeSubagentTarget & {
+  threadRef?: AgentRuntimeSubagentThreadRef
+  signal: AbortSignal
+}
+
 /**
  * Provider-owned child execution controls. AgentRuntime owns orchestration,
  * persistence, tool publication, and parent/child accounting; adapters only
- * translate these four operations to their provider protocol.
+ * translate these lifecycle operations to their provider protocol.
  */
 export type AgentRuntimeSubagentAdapter = {
   spawn(
     context: AgentRuntimeAdapterContext,
     input: AgentRuntimeSubagentSpawnInput
+  ): Promise<AgentRuntimeSubagentResult>
+  resume(
+    context: AgentRuntimeAdapterContext,
+    input: AgentRuntimeSubagentResumeInput
   ): Promise<AgentRuntimeSubagentResult>
   inspect(
     context: AgentRuntimeAdapterContext,
@@ -225,6 +251,10 @@ export type AgentRuntimeSubagentAdapter = {
   cancel(
     context: AgentRuntimeAdapterContext,
     input: AgentRuntimeSubagentCancelInput
+  ): Promise<void>
+  delete(
+    context: AgentRuntimeAdapterContext,
+    input: AgentRuntimeSubagentDeleteInput
   ): Promise<void>
 }
 

@@ -198,6 +198,44 @@ describe('RuntimeCapabilityBroker', () => {
     expect(betaCall).not.toHaveBeenCalled()
   })
 
+  it('filters managed discovery by generic package scope', async () => {
+    const gateway = createRuntimeMcpToolGateway({
+      servers: [
+        { id: 'computer-server', packageName: '@sciforge/domain-computer-use', command: '/bin/computer' },
+        { id: 'other-server', packageName: '@sciforge/domain-other', command: '/bin/other' }
+      ],
+      clientFactory: async (server) => ({
+        listTools: vi.fn(async () => ({ tools: [{
+          name: 'operate',
+          description: `${server.packageName} operation`,
+          annotations: { readOnlyHint: true }
+        }] })),
+        callTool: vi.fn(async () => ({ content: [] })),
+        close: vi.fn(async () => undefined)
+      })
+    })
+    const surface = createCapabilityAgentToolSurface({
+      broker: createRuntimeCapabilityBroker({ broker: emptyBroker(), managedTools: gateway }),
+      resolveCaller: (context) => ({
+        audience: 'agent', callerId: `${context.runtimeId}:${context.threadId}`,
+        workspaceId: context.workspaceId
+      })
+    })
+    const result = await surface.call({
+      name: CAPABILITY_AGENT_TOOL_NAMES.discover,
+      arguments: { providerFamily: 'managed-mcp' },
+      context: {
+        requestId: 'scoped', runtimeId: 'codex', threadId: 'child',
+        workspaceId: '/tmp/workspace',
+        brokerScope: { providerFamily: 'managed-mcp', packageName: '@sciforge/domain-computer-use' }
+      }
+    })
+    expect(result.value).toEqual([expect.objectContaining({
+      description: '@sciforge/domain-computer-use operation',
+      tags: expect.arrayContaining(['package-sciforge-domain-computer-use'])
+    })])
+  })
+
   it('enforces runtime availability and preserves structured failures', async () => {
     const callTool = vi.fn(async () => ({
       content: [{ type: 'text', text: 'stale resource' }],
@@ -259,6 +297,74 @@ describe('RuntimeCapabilityBroker', () => {
       retryable: true,
       resourceIdentity: 'res_test_12345678901234567890'
     })
+  })
+
+  it('joins a pending managed write and fails admission instead of evicting it', async () => {
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const callTool = vi.fn(async () => {
+      await gate
+      return { content: [{ type: 'text' as const, text: 'completed' }] }
+    })
+    const gateway = createRuntimeMcpToolGateway({
+      servers: [{ id: 'pending-writes', command: '/bin/pending-writes' }],
+      clientFactory: async () => ({
+        listTools: vi.fn(async () => ({ tools: [{
+          name: 'publish',
+          description: 'Publish one external mutation.',
+          annotations: {
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true
+          }
+        }] })),
+        callTool,
+        close: vi.fn(async () => undefined)
+      })
+    })
+    const surface = createCapabilityAgentToolSurface({
+      broker: createRuntimeCapabilityBroker({
+        broker: emptyBroker(),
+        managedTools: gateway,
+        maxManagedInvocations: 1
+      }),
+      resolveCaller: (request) => ({
+        audience: 'agent',
+        callerId: `${request.runtimeId}:${request.threadId}`,
+        workspaceId: request.workspaceId
+      }),
+      requestApproval: async () => 'allowed' as const
+    })
+    const baseContext = {
+      requestId: 'pending-write',
+      runtimeId: 'future-runtime',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      workspaceId: '/tmp/workspace'
+    }
+    const discovered = await surface.call({
+      name: CAPABILITY_AGENT_TOOL_NAMES.discover,
+      arguments: { text: 'publish', providerFamily: 'managed-mcp' },
+      context: baseContext
+    })
+    const operationRef = (discovered.value as Array<{ operationRef: string }>)[0]!.operationRef
+    const invoke = (callId: string) => surface.call({
+      name: CAPABILITY_AGENT_TOOL_NAMES.invoke,
+      arguments: { operationRef, input: {} },
+      context: { ...baseContext, callId }
+    })
+
+    const first = invoke('call-1')
+    await vi.waitFor(() => expect(callTool).toHaveBeenCalledOnce())
+    const joined = invoke('call-1')
+    await expect(invoke('call-2')).rejects.toMatchObject({
+      code: 'idempotency_capacity_exceeded'
+    })
+    expect(callTool).toHaveBeenCalledOnce()
+    release?.()
+    await expect(Promise.all([first, joined])).resolves.toHaveLength(2)
+    expect(callTool).toHaveBeenCalledOnce()
   })
 
   it('retains rejected managed invocations so terminal failures cannot execute again', async () => {

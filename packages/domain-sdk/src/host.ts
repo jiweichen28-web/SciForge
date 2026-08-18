@@ -1,8 +1,15 @@
 import { z } from 'zod'
 
 import type { DomainMainAgentExecutionHost } from './agent-execution.js'
+import type { DomainMainExternalNavigationHost } from './external-navigation.js'
+import type {
+  DomainMainFileTransferHost,
+  DomainRendererFileTransferHost
+} from './file-transfer.js'
 import {
+  domainPackageModuleIdSchema,
   domainPackagePermissionIdSchema,
+  domainPackageStableVersionSchema,
   type DomainPackageJsonValue
 } from './contract.js'
 import type {
@@ -10,19 +17,25 @@ import type {
   DomainExecutionEventV1
 } from './reproducibility.js'
 import type { DomainMainPowerHost } from './power.js'
+import type { DomainMainPortableResourceReferencesHost } from './portable-resource-references.js'
+import type {
+  PrincipalContextSnapshot,
+  PrincipalSnapshot
+} from './principal.js'
 import type {
   DomainMainPackageSecretStoreHost,
   DomainMainPackageSettingsHost
 } from './package-storage.js'
 import type { TrustedDomainProcessEntryInput } from './process-entry.js'
-import type {
-  DomainCapabilityResourceHandle,
-  DomainRendererSessionResource,
-  DomainRendererWorkbenchSendMessageInput,
-  DomainRendererWorkbenchSendMessageResult,
-  DomainRendererWorkbenchSurfaceActivation,
-  DomainRendererWorkspaceFilePickerRequest,
-  DomainRendererWorkspacePickResult
+import {
+  domainWorkbenchRightPanelPlacementSchema,
+  type DomainCapabilityResourceHandle,
+  type DomainRendererSessionResource,
+  type DomainRendererWorkbenchSendMessageInput,
+  type DomainRendererWorkbenchSendMessageResult,
+  type DomainRendererWorkbenchSurfaceActivation,
+  type DomainRendererWorkspaceFilePickerRequest,
+  type DomainRendererWorkspacePickResult
 } from './renderer-contributions.js'
 import type { DomainWorkflowExecutionReceiptProvider } from './workflow-template.js'
 import type { DomainMainVisualCaptureHost } from './visual-capture.js'
@@ -31,7 +44,10 @@ import type {
   WorkspaceHostOpenRemoteSessionInput
 } from './workspace-host.js'
 export * from './agent-execution.js'
+export * from './external-navigation.js'
+export * from './file-transfer.js'
 export * from './power.js'
+export * from './portable-resource-references.js'
 export * from './package-storage.js'
 export * from './renderer-contributions.js'
 export * from './visual-capture.js'
@@ -69,6 +85,8 @@ export type DomainMcpTrustedInvocationMetadataContribution = Readonly<{
   source: 'trusted-invocation'
 }>
 export const MAIN_EXTENSION_CONTRIBUTION_KIND = 'main.extension' as const
+export const MAIN_INTERNAL_SERVICE_DESCRIPTOR_LOCATION =
+  'main.internal-service-descriptor' as const
 export const MAIN_SYSTEM_CAPABILITY_GRANT_CONTRIBUTION_KIND =
   'main.system-capability-grant' as const
 
@@ -130,6 +148,41 @@ export type DomainMainExtensionContract = z.infer<
   typeof domainMainExtensionContractSchema
 >
 
+export const domainMainInternalServiceDescriptorSchema = z.object({
+  location: z.literal(MAIN_INTERNAL_SERVICE_DESCRIPTOR_LOCATION),
+  serviceId: domainPackageModuleIdSchema,
+  contractVersion: domainPackageStableVersionSchema,
+  allowedConsumerModuleIds: z.array(domainPackageModuleIdSchema).min(1).max(128)
+}).strict().superRefine((descriptor, context) => {
+  if (new Set(descriptor.allowedConsumerModuleIds).size !==
+    descriptor.allowedConsumerModuleIds.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['allowedConsumerModuleIds'],
+      message: 'Internal service consumer module IDs must be unique.'
+    })
+  }
+})
+
+type ParsedDomainMainInternalServiceDescriptor = z.infer<
+  typeof domainMainInternalServiceDescriptorSchema
+>
+export type DomainMainInternalServiceDescriptor = Readonly<
+  Omit<ParsedDomainMainInternalServiceDescriptor, 'allowedConsumerModuleIds'> & {
+    allowedConsumerModuleIds: readonly string[]
+  }
+>
+
+export function defineDomainMainInternalServiceDescriptor(
+  input: DomainMainInternalServiceDescriptor
+): DomainMainInternalServiceDescriptor {
+  const descriptor = domainMainInternalServiceDescriptorSchema.parse(input)
+  return Object.freeze({
+    ...descriptor,
+    allowedConsumerModuleIds: Object.freeze([...descriptor.allowedConsumerModuleIds])
+  })
+}
+
 export type DomainRuntimeContributionOwner = Readonly<{
   moduleId: string
   moduleVersion: string
@@ -140,6 +193,8 @@ export type DomainMainContribution = Readonly<{
   kind: typeof MAIN_EXTENSION_CONTRIBUTION_KIND
   packageName: string
   owner: DomainRuntimeContributionOwner
+  /** Optional manifest declaration version, projected only from trusted metadata. */
+  version?: string
   contract: DomainPackageJsonValue
   value: unknown
 }>
@@ -216,6 +271,10 @@ type DomainMainTurnLifecycleEventBase = Readonly<{
   /** Host-owned stable identity for the accepted user directive. */
   clientDirectiveId?: string
   workspaceRoot?: string
+  /** Immutable Host attribution captured for this exact delivery attempt. */
+  principal?: PrincipalSnapshot
+  /** Exact signed-in or signed-out Host authorization lease for this attempt. */
+  principalContext?: PrincipalContextSnapshot
   occurredAt: string
 }>
 
@@ -247,9 +306,24 @@ export type DomainMainAfterTurnEvent = DomainMainTurnLifecycleEventBase & Readon
     }>
 )
 
+/** Terminal ownership event for a persistent child provider turn. */
+export type DomainMainPersistentChildAfterTurnEvent = Readonly<{
+  kind: 'after-persistent-child-turn'
+  state: 'completed' | 'failed' | 'cancelled'
+  runtimeId: string
+  threadId: string
+  turnId: string
+  childId: string
+  parentThreadId: string
+  parentTurnId: string
+  workspaceRoot?: string
+  occurredAt: string
+}>
+
 export type DomainMainTurnLifecycleEvent =
   | DomainMainBeforeTurnEvent
   | DomainMainAfterTurnEvent
+  | DomainMainPersistentChildAfterTurnEvent
 
 export type DomainMainDurableTurnBoundary = Readonly<{
   issuerEpoch: string
@@ -260,6 +334,10 @@ export type DomainMainDurableTurnBoundary = Readonly<{
   threadId: string
   clientDirectiveId: string
   workspaceRoot?: string
+  /** Immutable Host attribution; absent for signed-out or pre-attribution history. */
+  principal?: PrincipalSnapshot
+  /** Exact Host authorization lease; absent only for legacy unknown attribution. */
+  principalContext?: PrincipalContextSnapshot
   phase: 'pending-start' | 'watching' | 'completed-intent' | 'terminal-settlement'
   turnId?: string
   terminalState?: 'completed' | 'failed' | 'cancelled' | 'rejected'
@@ -348,6 +426,7 @@ export type DomainMainSystemCapabilityInvoker = Readonly<{
       idempotencyKey?: string
       resource?: DomainCapabilityResourceHandle
       expectedRevision?: string
+      signal?: AbortSignal
       authorization?: Readonly<{
         /**
          * The host may propagate an already-approved outer action. It must
@@ -479,6 +558,10 @@ export type DomainTurnArtifactEvent = Readonly<{
   fileEffects?: DomainTurnFileEffectsV1
   filePatchReceipts?: readonly DomainTurnFilePatchReceiptV1[]
   artifacts: readonly unknown[]
+  /** Host-captured immutable attribution; absent for a signed-out turn. */
+  principal?: PrincipalSnapshot
+  /** Exact Host authorization lease; absent only for legacy unknown attribution. */
+  principalContext?: PrincipalContextSnapshot
 }>
 
 /** Opaque completed non-Agent execution delivered through the same stream. */
@@ -641,19 +724,50 @@ export type DomainWorkbenchRightPanelActivation = Readonly<{
   payload: DomainPackageJsonValue
 }>
 
+export type DomainWorkbenchRightPanelPlacement = z.infer<
+  typeof domainWorkbenchRightPanelPlacementSchema
+>
+
+/**
+ * Host-owned routing for a right-panel request.
+ *
+ * A package may omit placement (or request `focused`), explicitly request a
+ * `new` pane, or echo a `surfaceId` received from its render context to target
+ * that exact mounted pane. Packages must not create surface identities.
+ */
+export type DomainWorkbenchRightPanelTarget =
+  | Readonly<{
+      placement?: 'focused'
+      surfaceId?: never
+    }>
+  | Readonly<{
+      placement: 'new'
+      surfaceId?: never
+    }>
+  | Readonly<{
+      placement?: never
+      surfaceId: string
+    }>
+
 export type DomainWorkbenchRightPanelRenderContext = Readonly<{
+  /** True only while the Session is foreground and this pane intersects the Dock viewport. */
   active: boolean
+  /** Keyboard and command-routing focus within the owning Session dock. */
+  focused: boolean
+  /** Stable opaque Host identity that nested requests may echo, but never create. */
+  surfaceId: string
   className: string
   onCollapse: () => void
   session: DomainWorkbenchRightPanelSession
   activation?: DomainWorkbenchRightPanelActivation
 }>
 
-export type DomainWorkbenchOpenRightPanelInput = Readonly<{
-  contributionId: string
-  sessionId: string
-  activation?: DomainWorkbenchRightPanelActivation
-}>
+export type DomainWorkbenchOpenRightPanelInput =
+  Readonly<{
+    contributionId: string
+    sessionId: string
+    activation?: DomainWorkbenchRightPanelActivation
+  }> & DomainWorkbenchRightPanelTarget
 
 /**
  * Exact, domain-neutral resource identity used to request a renderer-owned
@@ -669,10 +783,11 @@ export type DomainWorkbenchExactResource = Readonly<{
   }>
 }>
 
-export type DomainWorkbenchOpenResourceInput = Readonly<{
-  sessionId: string
-  resource: DomainWorkbenchExactResource
-}>
+export type DomainWorkbenchOpenResourceInput =
+  Readonly<{
+    sessionId: string
+    resource: DomainWorkbenchExactResource
+  }> & DomainWorkbenchRightPanelTarget
 
 export type DomainWorkbenchOpenSurfaceInput = Readonly<{
   contributionId: string
@@ -685,26 +800,27 @@ export type DomainWorkbenchToggleGlobalOverlayInput =
     open?: boolean
   }>
 
-export type DomainWorkspacePreviewTarget = Readonly<{
-  path: string
-  sessionId: string
-  workspaceRoot?: string
-  mimeType?: string
-  kind?: 'file' | 'directory'
-  line?: number
-  column?: number
-  selection?: DomainPackageJsonValue
-  anchor?: DomainPackageJsonValue
-  integrity?: Readonly<{
-    algorithm: 'sha256'
-    expectedDigest: string
-  }>
-  returnTo?: Readonly<{
-    contributionId: string
-    label?: string
-    activation?: DomainWorkbenchRightPanelActivation
-  }>
-}>
+export type DomainWorkspacePreviewTarget =
+  Readonly<{
+    path: string
+    sessionId: string
+    workspaceRoot?: string
+    mimeType?: string
+    kind?: 'file' | 'directory'
+    line?: number
+    column?: number
+    selection?: DomainPackageJsonValue
+    anchor?: DomainPackageJsonValue
+    integrity?: Readonly<{
+      algorithm: 'sha256'
+      expectedDigest: string
+    }>
+    returnTo?: Readonly<{
+      contributionId: string
+      label?: string
+      activation?: DomainWorkbenchRightPanelActivation
+    }>
+  }> & DomainWorkbenchRightPanelTarget
 
 export type DomainRendererWorkspacePreviewHost = Readonly<{
   open: (target: DomainWorkspacePreviewTarget) => void
@@ -741,6 +857,24 @@ export type DomainMainTextSanitizerHost = Readonly<{
   sanitizeText: (value: string) => string
 }>
 
+export type DomainMainInternalServiceRegistration<Service extends object = object> = Readonly<{
+  serviceId: string
+  contractVersion: string
+  allowedConsumerModuleIds: readonly string[]
+  service: Service
+}>
+
+/**
+ * Owner-scoped main-process service mediation. The Host derives both owners
+ * from generated composition; runtime input cannot name either package owner.
+ */
+export type DomainMainInternalServiceHost = Readonly<{
+  register<Service extends object>(
+    registration: DomainMainInternalServiceRegistration<Service>
+  ): void
+  acquire<Service extends object>(serviceId: string, contractVersion: string): Service
+}>
+
 /**
  * Main-process services available to every trusted domain package.
  *
@@ -750,6 +884,8 @@ export type DomainMainTextSanitizerHost = Readonly<{
  */
 export type DomainMainHost = Readonly<{
   getUserDataDir: () => string
+  /** Stable opaque Host installation identity; introduced in Host API 1.3. */
+  getDeviceId?: () => string
   /** Application root used to resolve trusted bundled process entries. */
   getAppRoot?: () => string
   /** Executable used to launch trusted bundled Node process entries. */
@@ -765,6 +901,17 @@ export type DomainMainHost = Readonly<{
   openPath?: (path: string) => Promise<void>
   resolveWorkspaceServerArtifact?: () => Promise<WorkspaceHostArtifact>
   capabilities?: DomainMainSystemCapabilityInvoker
+  /**
+   * Owner-scoped Host facade. It derives caller and Principal exclusively from
+   * the active capability invocation; packages cannot supply either value.
+   */
+  fileTransfers?: DomainMainFileTransferHost
+  /** Owner-scoped, active-invocation-bound, one-shot safe navigation targets. */
+  externalNavigation?: DomainMainExternalNavigationHost
+  /** Owner-scoped materialization/export facade bound to the active capability invocation. */
+  portableResources?: DomainMainPortableResourceReferencesHost
+  /** Owner-scoped, main-process-only package service mediation. */
+  internalServices?: DomainMainInternalServiceHost
   visualCapture?: DomainMainVisualCaptureHost
   textSanitizer?: DomainMainTextSanitizerHost
 }>
@@ -901,7 +1048,7 @@ export type DomainRendererCapabilityInvoker = Readonly<{
   observe<TState>(
     contract: DomainRendererCapabilityObservationContract<TState>,
     resource: DomainCapabilityResourceHandle,
-    options?: Readonly<{ workspaceId?: string }>
+    options?: Readonly<{ workspaceId?: string; signal?: AbortSignal }>
   ): Promise<DomainRendererCapabilityObservation<TState>>
   invoke<TInput, TOutput>(
     contract: DomainRendererCapabilityContract<TInput, TOutput>,
@@ -911,6 +1058,7 @@ export type DomainRendererCapabilityInvoker = Readonly<{
       resource?: DomainCapabilityResourceHandle
       expectedRevision?: string
       approval?: Readonly<{ mode: 'confirmation' }>
+      signal?: AbortSignal
     }>
   ): Promise<TOutput>
   subscribe?(
@@ -926,6 +1074,8 @@ export type DomainRendererHost = Readonly<{
   /** Lazily exposes installed renderer extension points to other trusted packages. */
   contributions?: DomainRendererContributionHost
   openExternal: (url: string) => void | Promise<void>
+  /** Renderer-safe pickers return opaque handles; local paths never cross this boundary. */
+  fileTransfers?: DomainRendererFileTransferHost
   workspace?: DomainRendererWorkspaceHost
   workspacePreview?: DomainRendererWorkspacePreviewHost
   workbench?: DomainRendererWorkbenchHost

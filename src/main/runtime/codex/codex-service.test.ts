@@ -376,7 +376,101 @@ describe('Codex child summary index', () => {
         summary: 'Done'
       })
     ])
+    await service.publishSyntheticEvent({
+      runtimeId: 'codex',
+      threadId: 'parent-thread',
+      kind: 'child_event',
+      child: {
+        ...child,
+        status: 'completed',
+        metadata: { lifecycleOperation: 'delete' },
+        updatedAt: '2026-08-09T00:00:02.000Z'
+      }
+    })
+    await expect(service.listStoredThreadChildren('parent-thread')).resolves.toEqual([])
     expect(readSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Codex persistent child receipt lifecycle', () => {
+  it('does not publish a late child tool fact into an inactive or newer parent turn', async () => {
+    const service = new CodexRuntimeService({
+      settings: async () => settings(),
+      storageRoot: await tempRoot()
+    })
+    const probe = service as unknown as {
+      activeTurns: Map<string, string>
+      publishCodexChildToolFactToParent(
+        event: CodexThreadEventPayload,
+        input: {
+          parentThreadId: string
+          parentTurnId: string
+          childThreadId: string
+          childTurnId: string
+        }
+      ): Promise<void>
+    }
+    const event: CodexThreadEventPayload = {
+      threadId: 'child-thread',
+      turnId: 'child-turn',
+      tool: {
+        itemId: 'child-tool-call',
+        summary: 'Child tool call',
+        status: 'success'
+      }
+    }
+    const input = {
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn-old',
+      childThreadId: 'child-thread',
+      childTurnId: 'child-turn'
+    }
+
+    await expect(probe.publishCodexChildToolFactToParent(event, input)).resolves.toBeUndefined()
+
+    probe.activeTurns.set(input.parentThreadId, 'parent-turn-new')
+    await expect(probe.publishCodexChildToolFactToParent(event, input)).resolves.toBeUndefined()
+  })
+
+  it('still fails closed when the active parent turn has no Host proof ledger', async () => {
+    const service = new CodexRuntimeService({
+      settings: async () => settings(),
+      storageRoot: await tempRoot()
+    })
+    const probe = service as unknown as {
+      activeTurns: Map<string, string>
+      publishCodexChildToolFactToParent(
+        event: CodexThreadEventPayload,
+        input: {
+          parentThreadId: string
+          parentTurnId: string
+          childThreadId: string
+          childTurnId: string
+        }
+      ): Promise<void>
+    }
+    const input = {
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn',
+      childThreadId: 'child-thread',
+      childTurnId: 'child-turn'
+    }
+    probe.activeTurns.set(input.parentThreadId, input.parentTurnId)
+
+    await expect(
+      probe.publishCodexChildToolFactToParent(
+        {
+          threadId: input.childThreadId,
+          turnId: input.childTurnId,
+          tool: {
+            itemId: 'child-tool-call',
+            summary: 'Child tool call',
+            status: 'success'
+          }
+        },
+        input
+      )
+    ).rejects.toThrow('cannot resolve the parent Host proof ledger')
   })
 })
 
@@ -2489,6 +2583,148 @@ describe('CodexRuntimeService compatibility operations', () => {
     )
   })
 
+  it('revalidates the turn Principal after terminal fact I/O without publishing capability payloads', async () => {
+    const storageRoot = await tempRoot()
+    const client = controllableClient()
+    const broadcast = captureBroadcastEvents()
+    let pendingServerRequests: CodexAppServerPendingRequestRegistryOptions | undefined
+    let principalCurrent = true
+    let deliveryEffect: 'read' | 'external-write' = 'external-write'
+    const call = vi.fn(async () => ({
+      tool: 'sciforge_invoke',
+      deliveryEffect,
+      value: {
+        capabilityId: 'content-space.create-folder',
+        operationRef: `op_${'a'.repeat(24)}`,
+        output: { ok: true },
+        changed: false,
+        replayed: false,
+        completedAt: '2026-08-17T00:00:00.000Z'
+      }
+    }))
+    const capabilityAgentTools: AgentRuntimeToolSurface = {
+      tools: () => [{
+        type: 'function',
+        name: 'sciforge_invoke',
+        description: 'Invoke a capability.',
+        inputSchema: { type: 'object', properties: {} }
+      }],
+      assertPrincipalLease: () => {
+        if (!principalCurrent) {
+          throw Object.assign(new Error('The captured Principal changed.'), {
+            code: 'principal_changed',
+            retryable: false
+          })
+        }
+      },
+      call
+    }
+    const service = new CodexRuntimeService({
+      settings: async () => settings(),
+      storageRoot,
+      capabilityAgentTools,
+      createClient: (options) => {
+        pendingServerRequests = options.pendingServerRequests as CodexAppServerPendingRequestRegistryOptions
+        return client
+      }
+    })
+
+    await service.startThread({
+      threadId: 'principal-terminal-thread',
+      title: 'Principal terminal barrier',
+      workspace: '/tmp/capability-workspace'
+    })
+    broadcast.mockImplementation((event) => {
+      if (event.tool?.meta?.phase === 'succeeded') principalCurrent = false
+    })
+    try {
+      await expect(pendingServerRequests?.onToolCallRequest?.({
+        requestId: 'principal-terminal-request',
+        callId: 'principal-terminal-call',
+        threadId: 'principal-terminal-thread',
+        turnId: 'turn-1',
+        tool: 'sciforge_invoke',
+        arguments: { secretTarget: 'must-not-enter-terminal-fact' }
+      })).resolves.toMatchObject({
+        success: false,
+        errorCode: 'outcome_unknown',
+        retryable: false
+      })
+
+      principalCurrent = true
+      deliveryEffect = 'read'
+      await expect(pendingServerRequests?.onToolCallRequest?.({
+        requestId: 'principal-terminal-read-request',
+        callId: 'principal-terminal-read-call',
+        threadId: 'principal-terminal-thread',
+        turnId: 'turn-1',
+        tool: 'sciforge_invoke',
+        arguments: { operationRef: 'read-only-operation' }
+      })).resolves.toMatchObject({
+        success: false,
+        errorCode: 'principal_changed',
+        retryable: false
+      })
+
+      const factsBeforeRejectedPreflight = broadcast.mock.calls.length
+      principalCurrent = false
+      await expect(pendingServerRequests?.onToolCallRequest?.({
+        requestId: 'principal-preflight-rejected-request',
+        callId: 'principal-preflight-rejected-call',
+        threadId: 'principal-terminal-thread',
+        turnId: 'turn-1',
+        tool: 'sciforge_invoke',
+        arguments: { secretTarget: 'must-not-enter-dispatched-fact' }
+      })).resolves.toMatchObject({
+        success: false,
+        errorCode: 'principal_changed',
+        retryable: false
+      })
+      expect(broadcast.mock.calls).toHaveLength(factsBeforeRejectedPreflight)
+
+      principalCurrent = true
+      const factsBeforeDispatchedBarrier = broadcast.mock.calls.length
+      broadcast.mockImplementation((event) => {
+        if (event.tool?.meta?.phase === 'dispatched') principalCurrent = false
+      })
+      await expect(pendingServerRequests?.onToolCallRequest?.({
+        requestId: 'principal-dispatched-barrier-request',
+        callId: 'principal-dispatched-barrier-call',
+        threadId: 'principal-terminal-thread',
+        turnId: 'turn-1',
+        tool: 'sciforge_invoke',
+        arguments: { secretTarget: 'must-not-cross-dispatched-barrier' }
+      })).resolves.toMatchObject({
+        success: false,
+        errorCode: 'principal_changed',
+        retryable: false
+      })
+      expect(call).toHaveBeenCalledTimes(2)
+      const dispatchedBarrierFacts = broadcast.mock.calls
+        .slice(factsBeforeDispatchedBarrier)
+        .map(([event]) => event)
+      expect(dispatchedBarrierFacts.map((event) => event.tool?.meta?.phase)).toEqual([
+        'dispatched',
+        'failed'
+      ])
+      for (const event of dispatchedBarrierFacts) {
+        expect(event.tool?.meta).not.toHaveProperty('arguments')
+        expect(event.tool?.meta).not.toHaveProperty('structuredContent')
+      }
+
+      const terminal = broadcast.mock.calls
+        .map(([event]) => event)
+        .find((event) => event.tool?.meta?.phase === 'succeeded')
+      expect(terminal?.tool?.detail).toBe('Dynamic tool completed successfully.')
+      expect(terminal?.tool?.meta).not.toHaveProperty('arguments')
+      expect(terminal?.tool?.meta).not.toHaveProperty('structuredContent')
+    } finally {
+      broadcast.mockRestore()
+    }
+
+    expect(call).toHaveBeenCalledTimes(2)
+  })
+
   it('uses a stable Host JSON-RPC identity when legacy tool calls omit provider callId', async () => {
     const storageRoot = await tempRoot()
     const managedCodexHome = await tempRoot()
@@ -2615,7 +2851,7 @@ describe('CodexRuntimeService compatibility operations', () => {
     expect(ordinaryResult).not.toHaveProperty('completionReceipts')
   })
 
-  it('preserves structured native visual recovery metadata in Codex tool receipts', async () => {
+  it('preserves the adaptive visual timeout through Codex tool receipts', async () => {
     const storageRoot = await tempRoot()
     const client = controllableClient()
     const broadcast = captureBroadcastEvents()
@@ -2630,15 +2866,15 @@ describe('CodexRuntimeService compatibility operations', () => {
         }
       ],
       call: async () => {
-        throw Object.assign(new Error('The bound surface is hidden.'), {
-          code: 'visual_layout_owner_changed',
-          failureClass: 'layout_unavailable',
-          retryable: false,
-          providerStage: 'visual_surface_binding',
+        throw Object.assign(new Error('Visual inspection exceeded the configured 180000 ms end-to-end deadline.'), {
+          code: 'visual_inspection_timeout',
+          failureClass: 'timeout',
+          retryable: true,
+          providerStage: 'model_router_deadline',
           resourceIdentity: 'visual:current',
           recovery: {
-            action: 'restore_bound_surface',
-            instruction: 'Restore the task-bound surface before starting a new visual call.'
+            action: 'retry_visual_inspection',
+            instruction: 'Retry sciforge_look once with the same source and task using timeoutMs=270000.'
           }
         })
       }
@@ -2668,11 +2904,15 @@ describe('CodexRuntimeService compatibility operations', () => {
       })
     ).resolves.toMatchObject({
       success: false,
-      errorCode: 'visual_layout_owner_changed',
-      failureClass: 'layout_unavailable',
-      retryable: false,
-      recoveryGuidance: 'Restore the task-bound surface before starting a new visual call.',
-      providerStage: 'visual_surface_binding',
+      contentItems: [{
+        type: 'inputText',
+        text: expect.stringContaining('timeoutMs=270000')
+      }],
+      errorCode: 'visual_inspection_timeout',
+      failureClass: 'timeout',
+      retryable: true,
+      recoveryGuidance: 'Retry sciforge_look once with the same source and task using timeoutMs=270000.',
+      providerStage: 'model_router_deadline',
       resourceIdentity: 'visual:current'
     })
     expect(broadcast).toHaveBeenCalledWith(
@@ -2680,10 +2920,10 @@ describe('CodexRuntimeService compatibility operations', () => {
         tool: expect.objectContaining({
           status: 'error',
           meta: expect.objectContaining({
-            errorCode: 'visual_layout_owner_changed',
-            retryable: false,
-            recoveryGuidance: 'Restore the task-bound surface before starting a new visual call.',
-            providerStage: 'visual_surface_binding'
+            errorCode: 'visual_inspection_timeout',
+            retryable: true,
+            recoveryGuidance: 'Retry sciforge_look once with the same source and task using timeoutMs=270000.',
+            providerStage: 'model_router_deadline'
           })
         })
       })
@@ -2699,6 +2939,7 @@ describe('CodexRuntimeService compatibility operations', () => {
     vi.mocked(queued.client.startTurn)
       .mockResolvedValueOnce({ turn: { id: 'parent-turn' } })
       .mockResolvedValueOnce({ turn: { id: 'child-turn' } })
+      .mockResolvedValueOnce({ turn: { id: 'child-resumed-turn' } })
     const service = new CodexRuntimeService({
       settings: async () => settings(),
       storageRoot,
@@ -2711,6 +2952,9 @@ describe('CodexRuntimeService compatibility operations', () => {
     })
 
     const spawned = vi.fn()
+    const threadBound = vi.fn(async () => {
+      expect(queued.client.startTurn).toHaveBeenCalledTimes(1)
+    })
     const controller = new AbortController()
     const completion = service.spawnSubagent({
       childId: 'child-1',
@@ -2720,6 +2964,7 @@ describe('CodexRuntimeService compatibility operations', () => {
       prompt: 'Review the repository.',
       signal: controller.signal,
       appendTranscript: vi.fn(async () => undefined),
+      onThreadBound: threadBound,
       onSpawned: spawned
     })
     await vi.waitFor(() =>
@@ -2729,6 +2974,10 @@ describe('CodexRuntimeService compatibility operations', () => {
         turnId: 'child-turn'
       })
     )
+    expect(threadBound).toHaveBeenCalledWith({
+      runtime: 'codex',
+      threadId: expect.any(String)
+    })
     await expect(
       service.inspectSubagent({
         childId: 'child-1',
@@ -2778,6 +3027,60 @@ describe('CodexRuntimeService compatibility operations', () => {
         signal: new AbortController().signal
       })
     ).resolves.toMatchObject({ state: 'missing' })
+
+    const resumedSpawned = vi.fn()
+    const resumedThreadBound = vi.fn(async () => {
+      expect(queued.client.startTurn).toHaveBeenCalledTimes(2)
+    })
+    const resumedCompletion = service.resumeSubagent({
+      childId: 'child-1',
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn',
+      prompt: 'Continue the interrupted review.',
+      threadRef: {
+        runtime: 'codex',
+        threadId: 'child-codex-thread',
+        turnId: 'child-turn'
+      },
+      signal: new AbortController().signal,
+      appendTranscript: vi.fn(async () => undefined),
+      onThreadBound: resumedThreadBound,
+      onSpawned: resumedSpawned
+    })
+    await vi.waitFor(() => expect(resumedSpawned).toHaveBeenCalledWith({
+      runtime: 'codex',
+      threadId: 'child-codex-thread',
+      turnId: 'child-resumed-turn'
+    }))
+    expect(resumedThreadBound).toHaveBeenCalledWith({
+      runtime: 'codex',
+      threadId: 'child-codex-thread'
+    })
+    queued.push({
+      type: 'event',
+      channel: CODEX_MAIN_IPC_CHANNELS.event,
+      payload: {
+        method: 'turn/completed',
+        params: { threadId: 'child-codex-thread', turnId: 'child-resumed-turn' }
+      }
+    })
+    await expect(resumedCompletion).resolves.toMatchObject({
+      threadRef: {
+        runtime: 'codex',
+        threadId: 'child-codex-thread',
+        turnId: 'child-resumed-turn'
+      }
+    })
+    await service.deleteSubagent({
+      childId: 'child-1',
+      parentThreadId: 'parent-thread',
+      parentTurnId: 'parent-turn',
+      threadRef: { runtime: 'codex', threadId: 'child-codex-thread' },
+      signal: new AbortController().signal
+    })
+    expect(queued.client.request).toHaveBeenCalledWith('thread/archive', {
+      threadId: 'child-codex-thread'
+    })
     queued.close()
   })
 
